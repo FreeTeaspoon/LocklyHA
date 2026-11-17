@@ -228,7 +228,12 @@ class VisionClient(asyncio.DatagramProtocol):
                 local = (self._local_address, local[1])
                 self._send(0x20, self._uid + pack_address(local), address)
             elif kind == 0x40 and len(payload) == 16:
-                target = unpack_address(payload)
+                try:
+                    target = unpack_address(payload)
+                except VisionError:
+                    # A lookup server can return an empty/unusable endpoint.
+                    # Other advertised servers may still find the online hub.
+                    return
                 if len(self._targets) < 8 or target in self._targets:
                     self._targets.add(target)
                     self._send(0x41, self._uid, target)

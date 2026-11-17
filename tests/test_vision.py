@@ -207,6 +207,20 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.client._ready.done())
         self.assertEqual(self.client._peer, PEER)
 
+    async def test_empty_lookup_does_not_abort_other_servers(self):
+        server = ("192.0.2.1", 32100)
+        self.client._servers.add(server)
+        self.client._peer = None
+        self.client._authenticated = False
+        self.client._ready = asyncio.get_running_loop().create_future()
+        self.client.datagram_received(wire(0x40, bytes(16)), server)
+        self.assertFalse(self.client._ready.done())
+        self.assertFalse(self.transport.closed)
+        self.client.datagram_received(wire(0x40, pack_address(PEER)), server)
+        self.client.datagram_received(wire(0x42, pack_uid(UID)), PEER)
+        self.assertTrue(self.client._ready.done())
+        self.assertEqual(self.client._peer, PEER)
+
     async def test_rpc_cancellation_does_not_replay_command(self):
         self.client._connect = AsyncMock()
         request = asyncio.create_task(self.client.async_exchange(ble_frame()))
