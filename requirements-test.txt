@@ -5,3 +5,4 @@ homeassistant
 pycryptodome>=3.9.0
 paho-mqtt>=1.6.0
 av>=16.0.0
+numpy
