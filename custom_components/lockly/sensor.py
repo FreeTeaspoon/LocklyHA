@@ -91,6 +91,10 @@ class LocklyBatterySensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.data.get(self._lock_id, {})
 
     @property
+    def available(self) -> bool:
+        return super().available and self._lock_data.get("vision_connected", True)
+
+    @property
     def native_value(self) -> int | None:
         d = self._lock_data
 

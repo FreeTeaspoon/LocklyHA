@@ -181,6 +181,7 @@ _500_GROUP_PASSWORD_VERSIONED = frozenset({88})  # PGD238T
 # Only used as a hint before the first status response arrives; the lock's own
 # reported type always wins.
 MODEL_LOCK_TYPES = {
+    "PGD898S": 97,
     "PGD628F": 4,
     "PGD628FN": 21,
     "PGD628FG25": 127,

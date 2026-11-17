@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.exceptions import HomeAssistantError
 
 from . import LocklyCoordinator
 from .const import DOMAIN
@@ -57,10 +58,14 @@ class LocklyLock(CoordinatorEntity, LockEntity):
         return self._lock_data["is_locked"]
 
     @property
+    def available(self) -> bool:
+        return super().available and self._lock_data.get("vision_connected", True)
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self._lock_data
         attrs: dict[str, Any] = {}
-        for key in ("firmware_version", "door_sensor_open", "auto_unlock_delay_s"):
+        for key in ("firmware_version", "door_sensor_open", "auto_unlock_delay_s", "last_status_update"):
             val = d.get(key)
             if val is not None:
                 attrs[key] = val
@@ -71,7 +76,8 @@ class LocklyLock(CoordinatorEntity, LockEntity):
         self._attr_is_unlocking = True
         self.async_write_ha_state()
         try:
-            await self.coordinator.async_unlock_lock(self._lock_id)
+            if not await self.coordinator.async_unlock_lock(self._lock_id):
+                raise HomeAssistantError("Lockly did not confirm that the lock unlocked")
         finally:
             self._attr_is_unlocking = False
             self.async_write_ha_state()
@@ -81,7 +87,8 @@ class LocklyLock(CoordinatorEntity, LockEntity):
         self._attr_is_locking = True
         self.async_write_ha_state()
         try:
-            await self.coordinator.async_lock_lock(self._lock_id)
+            if not await self.coordinator.async_lock_lock(self._lock_id):
+                raise HomeAssistantError("Lockly did not confirm that the lock locked")
         finally:
             self._attr_is_locking = False
             self.async_write_ha_state()

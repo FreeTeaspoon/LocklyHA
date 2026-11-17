@@ -53,6 +53,7 @@ from .api import (
 )
 from .capabilities import LockCapabilities, resolve_capabilities
 from .mqtt import LocklyMQTTManager
+from .vision import VisionClient, VisionError, is_vision_lock
 from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
@@ -99,7 +100,7 @@ def _rate_rssi(rssi: int | None) -> str:
         return "fair"
     return "weak"
 
-PLATFORMS = ["binary_sensor", "lock", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "lock", "sensor"]
 
 # Per-lock fields set by something other than a status reading — the MQTT
 # battery push and the access-log poll — which a poll rebuilding a lock's data
@@ -124,8 +125,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     coordinator.async_start_history_polling()
-    coordinator._mqtt_manager = LocklyMQTTManager(hass, coordinator)
-    await coordinator._mqtt_manager.async_start()
+    if any(not is_vision_lock(lock) for lock in coordinator.locks):
+        coordinator._mqtt_manager = LocklyMQTTManager(hass, coordinator)
+        await coordinator._mqtt_manager.async_start()
     _register_services(hass, coordinator)
     return True
 
@@ -167,6 +169,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self.des3_key: bytes | None = None
         self.locks: list[dict] = []
         self._session: aiohttp.ClientSession | None = None
+        self._vision_clients: dict[str, VisionClient] = {}
+        self._vision_commands: dict[str, asyncio.Lock] = {}
+        self._vision_reconnect_after: dict[str, float] = {}
         # True until we confirm cached-status is unsupported for this hub.
         self._cache_supported: bool = True
         # Lock ID -> live-status attempts so far.  Present means still trying;
@@ -283,6 +288,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
             # and works: senddata cannot serve those locks, and commands go over
             # the broker instead. This warned until 0.7.5, on locks that were
             # locking and unlocking perfectly.
+            elif is_vision_lock(lock):
+                _LOGGER.info("Lockly: %s uses the Vision Connect P2P transport", name)
             elif not lock.get("hubid"):
                 _LOGGER.info(
                     "Lockly: lock %s has no hub — it is WiFi-native, so commands "
@@ -366,6 +373,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
     def _learn_from_status(self, lock: dict, status: dict) -> None:
         """Record the lock type and nonce a status response revealed."""
         lock_id = lock["ID"]
+        if is_vision_lock(lock):
+            status["last_status_update"] = datetime.now(timezone.utc).isoformat()
         lock_type = status.get("lock_type")
         if lock_type is not None:
             known = self._capabilities.get(lock_id)
@@ -415,9 +424,20 @@ class LocklyCoordinator(DataUpdateCoordinator):
             lock_id = lock["ID"]
             status = None
 
+            # A hub-only login restores notifications without sending a BLE
+            # command or waking the lock. Keep reconnect attempts bounded.
+            vision = self._vision_clients.get(lock_id)
+            if (vision is not None and not vision.connected
+                    and time.monotonic() >= self._vision_reconnect_after.get(lock_id, 0)):
+                self._vision_reconnect_after[lock_id] = time.monotonic() + 300
+                try:
+                    await vision.async_connect()
+                except (VisionError, OSError):
+                    _LOGGER.debug("Lockly Vision hub reconnect failed")
+
             # cachedstatus is the hub's own cache, so a lock with no hub cannot
             # answer it: every call comes back cod=930 and says nothing.
-            if self._cache_supported and lock.get("hubid"):
+            if self._cache_supported and lock.get("hubid") and not is_vision_lock(lock):
                 cache_queried += 1
                 status = await api_cached_status(
                     self._session, self.jwt, self.des3_key, self.email, lock
@@ -504,6 +524,13 @@ class LocklyCoordinator(DataUpdateCoordinator):
             else:
                 result[lock_id] = dict(lock)
 
+            if is_vision_lock(lock):
+                result[lock_id] = {
+                    **result[lock_id],
+                    "vision_connected": bool(self._vision_clients.get(lock_id)
+                                             and self._vision_clients[lock_id].connected),
+                }
+
         if self._cache_supported and cache_queried and cache_failed_count == cache_queried:
             _LOGGER.info(
                 "Lockly: cachedstatus unsupported for this hub (hub firmware too old) — "
@@ -516,7 +543,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
         # calls fail with cod=930 by design, whatever the login. Counting them
         # dropped the token on every startup of an all-hubless account, two
         # seconds before MQTT connected with it (#16).
-        if not any_ok and any(lock.get("hubid") for lock in self.locks):
+        if not any_ok and any(lock.get("hubid") and not is_vision_lock(lock) for lock in self.locks):
             _LOGGER.warning("All lock queries failed — forcing re-login next cycle")
             self.jwt = None
 
@@ -595,6 +622,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
         if lock is None:
             _LOGGER.warning("Lockly: lock_id %s is not in the discovered lock list", lock_id)
             return False
+        if is_vision_lock(lock):
+            async with self._vision_commands.setdefault(lock_id, asyncio.Lock()):
+                return await self._send_vision_command(lock, unlock=unlock)
         nonce = await self._refresh_nonce(lock)
         host_pwd = await self._resolve_host_password(lock, nonce)
         action = api_unlock if unlock else api_lock
@@ -650,10 +680,79 @@ class LocklyCoordinator(DataUpdateCoordinator):
         )
         return False
 
+    async def _vision_exchange_raw(
+        self, lock: dict, frame_hex: str, quiet: bool = False
+    ) -> str | None:
+        """Relay through the authenticated Vision hub, never through MQTT."""
+        lock_id = lock["ID"]
+        try:
+            client = self._vision_clients.get(lock_id)
+            if client is None:
+                client = VisionClient(
+                    str(lock["p2pdid"]), str(lock["p2ppw"]),
+                    lambda frame: self._vision_status_received(lock, frame),
+                )
+                self._vision_clients[lock_id] = client
+            return (await client.async_exchange(bytes.fromhex(frame_hex))).hex().upper()
+        except (VisionError, OSError) as exc:
+            log = _LOGGER.debug if quiet else _LOGGER.warning
+            log("Lockly Vision: %s", exc)
+            return None
+
+    def _vision_status_received(self, lock: dict, frame: bytes) -> None:
+        """Merge unsolicited lock status without waking the lock on each poll."""
+        status = parse_ack(frame.hex(), str(lock["mc"]), lock["ID"])
+        if status and "lock_type" in status:
+            self._learn_from_status(lock, status)
+            self._publish_status(lock, status)
+
+    async def _send_vision_command(self, lock: dict, *, unlock: bool) -> bool:
+        """Use Vision for status, host credential and the final command.
+
+        Do not fall back to another transport or replay an uncertain command.
+        The lock's acknowledgement, rather than a UDP send, establishes success.
+        """
+        status = await self._query_live_status(lock)
+        if not status:
+            return False
+        self._learn_from_status(lock, status)
+        self._publish_status(lock, status)
+        nonce = self._nonces.get(lock["ID"])
+        password = self._host_passwords.get(lock["ID"])
+        if password is None:
+            query = build_query_pwd_cmd(str(lock["mc"]), lock["ID"], 0, nonce)
+            ack = await self._vision_exchange_raw(lock, query)
+            if ack:
+                credentials = parse_pwd_list_ack(
+                    ack, str(lock["mc"]), lock["ID"],
+                    five_hundred_group=self._caps_for(lock).supports_500_group_password,
+                )
+                if credentials:
+                    password = host_password_from(credentials.get("entries") or [])
+                    if password is not None:
+                        self._host_passwords[lock["ID"]] = password
+        password = password or str(lock.get("hc") or "")
+        if not password:
+            _LOGGER.warning("Lockly Vision: no host credential is available")
+            return False
+        builder = build_unlock_cmd if unlock else build_lock_cmd
+        frame = builder(str(lock["mc"]), lock["ID"], password, nonce, caps=self._caps_for(lock))
+        ack = await self._vision_exchange_raw(lock, frame)
+        accepted = parse_ack(ack, str(lock["mc"]), lock["ID"]) if ack else None
+        if not accepted:
+            return False
+        self._learn_from_status(lock, accepted)
+        self._publish_status(lock, accepted)
+        # Preserve the hardware-confirmed status instead of assuming a thrown
+        # bolt merely because the hub relayed the frame.
+        return accepted.get("is_locked") is (not unlock)
+
     async def _mqtt_exchange_raw(
         self, lock: dict, frame_hex: str, quiet: bool = False
     ) -> str | None:
         """Relay a frame over MQTT and return the lock's unparsed ACK."""
+        if is_vision_lock(lock):
+            return await self._vision_exchange_raw(lock, frame_hex, quiet)
         mqtt = getattr(self, "_mqtt_manager", None)
         if mqtt is None or not mqtt.connected:
             return None
@@ -671,7 +770,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         if not parsed and not quiet:
             # parse_ack already logs the decoded error byte. Say which lock and
             # which path, so this is not mistaken for a senddata failure.
-            _LOGGER.warning("Lockly: %s rejected the frame sent over MQTT", name)
+            _LOGGER.warning("Lockly: %s rejected the frame sent over %s",
+                            name, "Vision" if is_vision_lock(lock) else "MQTT")
         return parsed or None
 
     @staticmethod
@@ -683,7 +783,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
         Matter hubs (PGH260) are on the broker too, but senddata serves them
         on most accounts, so they keep it and fall back to MQTT only on failure.
         """
-        return not lock.get("hubid")
+        return not lock.get("hubid") and not is_vision_lock(lock)
 
     def _live_query_possible(self, lock: dict) -> bool:
         """Whether any transport could carry a live status query right now."""
@@ -703,6 +803,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         hub lock tries senddata first and the broker after it.
         """
         frame = build_query_status_cmd(str(lock["mc"]), lock["ID"])
+        if is_vision_lock(lock):
+            return await self._mqtt_exchange(lock, frame, quiet)
         if self._mqtt_only(lock):
             return await self._mqtt_exchange(lock, frame, quiet)
         status = await api_query_lock_status(
@@ -732,6 +834,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
             lock_id: {
                 **self.data[lock_id],
                 **status,
+                **({"vision_connected": bool(self._vision_clients.get(lock_id)
+                                            and self._vision_clients[lock_id].connected)}
+                   if is_vision_lock(lock) else {}),
                 "wired_door_sensor_connected": lock_id in self._door_sensor_proven,
             },
         })
@@ -849,8 +954,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
             return None
 
         _LOGGER.info(
-            "Lockly: got an on-demand door status response for %s over MQTT",
+            "Lockly: got an on-demand door status response for %s over %s",
             lock.get("na") or lock.get("blename") or lock["ID"],
+            "Vision" if is_vision_lock(lock) else "MQTT",
         )
         self._learn_from_status(lock, status)
         self._publish_status(lock, status)
@@ -1329,6 +1435,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(updated)
 
     async def async_shutdown(self) -> None:
+        for client in self._vision_clients.values():
+            await client.async_close()
+        self._vision_clients.clear()
         if self._token_renewal_cancel is not None:
             self._token_renewal_cancel()
             self._token_renewal_cancel = None

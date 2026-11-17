@@ -2,13 +2,53 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
-[![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.17-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.17)
+[![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0b1-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
 
 > **Unofficial integration.** Not affiliated with or endorsed by Lockly Security Inc.
+
+## Vision Connect fork
+
+This fork adds the Vision Connect control tunnel missing from upstream
+[Forcky/LocklyHA](https://github.com/Forcky/LocklyHA). Live status has been read
+from a **PGD898S** through a **T21 Vision Connect** hub using Lockly Home 1.6.2's
+PPCS protocol. It uses Python asyncio, with no phone bridge or vendor binary.
+
+| Vision capability | Validation |
+|---|---|
+| Current lock state | Hardware reports locked |
+| Door circuit | Hardware reports closed, open-door transition pending |
+| Battery | Hardware voltage; HA percentage is an approximate AA voltage curve |
+| Lock and unlock | Implemented with hardware ACK required; physical tests pending |
+| Refresh status button | Sends one live status query, which can beep |
+| External keypad/app updates | Receiver implemented; push delivery unverified |
+| Camera video / audio | Not implemented |
+| Guest PIN activation | Not verified on Vision |
+
+Account login supplies the hub ID and password. Only `LOCKLYV-number-suffix`
+PPCS IDs are supported. Other Vision connection formats are not implemented.
+The hub must be online, and HA needs outbound UDP access to Lockly's lookup
+servers and a reachable UDP path to the hub. No router port forward is required
+on the verified LAN setup.
+
+Startup and explicit refresh queries can beep. Successful startup queries are
+not repeated every 30 seconds. Hub reconnection uses hub-only login, which does
+not send a BLE command. Failed initial reads use the existing bounded retry
+policy. HA retains the last reading between updates; `last_status_update` on
+the lock shows when it was read. A connected hub alone does not prove that a
+reading is current. Use **Refresh status** when external changes have not arrived.
+
+For HACS, add `FreeTeaspoon/LocklyHA` as a custom Integration repository and
+select release `v0.8.0b1`. Replace the upstream installation first if present;
+keep the existing Lockly configuration entry, then restart HA so it loads the
+new Python modules. Existing device and entity IDs are preserved.
+
+See [Vision protocol notes](docs/vision.md) for transport details and checks.
+The feature descriptions below are inherited from upstream and are not a claim
+that every feature has been verified on Vision.
 
 ---
 
@@ -57,7 +97,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 
 ### Manual
 
-1. Download the [latest release](https://github.com/Forcky/LocklyHA/releases) zip file.
+1. Download the [latest release](https://github.com/FreeTeaspoon/LocklyHA/releases) zip file.
 2. Extract the `custom_components/lockly` folder into your HA configuration's `custom_components/` directory:
    ```
    config/

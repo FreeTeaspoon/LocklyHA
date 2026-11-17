@@ -498,6 +498,7 @@ async def main():
             self._session, self._cache_supported = object(), True
             self._live_init_attempts, self._live_init_retry_at = {}, {}
             self._capabilities, self._door_sensor_proven, self._nonces = {}, set(), {}
+            self._vision_clients, self._vision_reconnect_after = {}, {}
         async def _ensure_session(self): pass
         def _learn_from_status(self, lock, status):
             Coord._learn_from_status(self, lock, status)
@@ -543,6 +544,7 @@ async def main():
             self._live_init_attempts = {lk["ID"]: 0 for lk in locks}
             self._live_init_retry_at = {}
             self._capabilities, self._door_sensor_proven, self._nonces = {}, set(), {}
+            self._vision_clients, self._vision_reconnect_after = {}, {}
             self._mqtt_manager = Broker(connected)
             self.mqtt_reply, self.mqtt_calls = mqtt_reply, []
         async def _ensure_session(self): pass

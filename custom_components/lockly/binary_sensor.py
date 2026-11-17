@@ -56,7 +56,8 @@ class LocklyDoorSensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def available(self) -> bool:
         d = self._lock_data
-        return bool(d.get("wired_door_sensor_connected")) or bool(d.get("rf_door_sensor_connected"))
+        return (super().available and d.get("vision_connected", True)
+                and (bool(d.get("wired_door_sensor_connected")) or bool(d.get("rf_door_sensor_connected"))))
 
     @property
     def is_on(self) -> bool | None:
