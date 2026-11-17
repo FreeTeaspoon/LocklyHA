@@ -710,6 +710,36 @@ def parse_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
         return {}
 
 
+def outgoing_ble_command(frame_hex: str, master_code: str, uuid: str) -> int:
+    """Recover an outgoing frame's command byte for response correlation."""
+    frame = bytes.fromhex(frame_hex)
+    return AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(frame[6:-2])[0]
+
+
+def parse_action_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
+    """NewUnlockCmd replies contain result/status/event, not QueryLockStatus.
+
+    In particular, byte 4 is not a bolt-state byte in a 0A22/0A52 reply.
+    Reusing parse_ack here invented firmware, voltage and door changes.
+    """
+    try:
+        frame = bytes.fromhex(ack_hex)
+        if (len(frame) < 25 or frame[:4] != b"\xa1\xb2\xc3\xd4"
+                or frame[6:8] not in (b"\x0a\x22", b"\x0a\x52")
+                or int.from_bytes(frame[4:6], "little") != len(frame)
+                or crc8_lockly(frame[:-1]) != frame[-1]):
+            return {}
+        payload = frame[8:-1]
+        if not payload or len(payload) % 16:
+            return {}
+        plain = AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(payload)
+        if plain[0] != 0:
+            return {}
+        return {"command_accepted": True, "action_status_byte": plain[1]}
+    except (ValueError, IndexError):
+        return {}
+
+
 # ── Cached status bit masks (HubCacheStatusData) ─────────────────────────────
 # bit 0 (=1)   LOCK_STATUS_BIT  : 0=locked, 1=unlocked
 # bit 1 (=2)   HAS_WIRED_DS_BIT : wired door sensor present

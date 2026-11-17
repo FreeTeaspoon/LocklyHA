@@ -50,3 +50,8 @@ jobs:
         run: python tests/test_vision.py
         env:
           PYTHONPATH: .
+
+      - name: Camera decode and lifecycle
+        run: python tests/test_camera.py
+        env:
+          PYTHONPATH: .

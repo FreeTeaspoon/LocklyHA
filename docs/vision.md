@@ -14,15 +14,20 @@ Live status was verified on PGD898S, lock type 97, T21 hub firmware 0228,
 camera firmware 0098. Lock firmware reports 00960102. It returned a locked
 bolt, closed door circuit, and an AA battery voltage around 5.2 V.
 
-One HA unlock was confirmed on hardware. The immediate relock ACK still
-reported unlocked, but a status query 350 ms later confirmed locked. The
-integration now waits for motor completion with up to three read-only status
-queries, spaced 500 ms apart. This timing correction has offline regression
-coverage; the physical cycle has not been repeated after the correction.
-Open-door transitions and unsolicited updates have not yet been verified. The credential-list query returned no usable host
-entry on this hardware; commands can use the authenticated account's cloud
-host-credential copy instead. Video/audio and guest PIN activation are outside
-the validated support in this release.
+Control uses separate parsers for action replies and status replies. An
+`0A22` action reply has a result/status/event layout; treating it as a full
+`0A1E` status report invents battery, firmware and door fields. Successful
+commands require an accepted action reply followed by a real status query
+confirming the requested bolt state, with up to three queries 500 ms apart.
+Delayed responses are matched by BLE command before satisfying a request.
+
+The camera's HEVC frames decode successfully to live JPEG images. Camera and
+status sessions were verified concurrently. Open-door transitions and external
+keypad/app notifications remain unverified. The hub cache query returns an
+empty 64-byte record on this firmware, so it cannot supply silent state updates.
+The credential-list query rejects this hardware's request; commands use the
+authenticated account's cloud host-credential copy. Cloud access history remains
+available. Direct BLE history and guest PIN activation are not validated.
 
 ## Packet and session layout
 
@@ -63,15 +68,32 @@ keepalive do not send BLE frames.
 
 Each lock's HA lock/unlock calls are serialized. A command first obtains status,
 learns type/nonce, resolves the host credential, builds the existing Vision BLE
-command, then requires a parsed ACK or a subsequent status read reporting the requested
-bolt state. Confirmation queries are bounded and never resend the physical
+command, then requires an accepted action ACK and a subsequent status read reporting
+the requested bolt state. Confirmation queries are bounded and never resend the physical
 command. A
 successful UDP send or relay result alone does not count as successful locking.
+
+## Live video
+
+StartLive is command 1 with five little-endian integers, `(2, 0, 0, 0, 0)`.
+Response 2 reports codec and resolution; codec 5 is HEVC, not an error. The tested
+hub announced 1280 × 720 but supplied 1920 × 1080 frames. StopLive is command 3,
+with `(0, 0)`, and this hub responds with command 19.
+
+Reliable channel 1 has its own sequence counter. Each video frame has a 32-byte
+`<8I` header: flag, size, PTS, frame type, count, online viewers, codec, reserved.
+Flags 428213528 and 428216305 carry Annex B video; frame type 1 is a keyframe.
+The receiver checks frame sizes, reorders and acknowledges fragments, and keeps
+a bounded queue. After overflow it waits for a keyframe. PyAV decodes in HA's
+executor and encodes 960 × 540 JPEG for the camera entity's MJPEG viewer.
+Video starts on demand, stops after ten idle seconds, and closes on entity unload.
+No video is stored. Audio, talk and SD-card playback are not implemented.
 
 ## Checks
 
 Run `ruff check .`, `python tests/test_frame.py`, `python tests/test_exchange.py`
-and `python tests/test_vision.py` with Home Assistant importable. The suites
+`python tests/test_vision.py` and `python tests/test_camera.py` with Home Assistant importable. The suites
 need no network or physical hardware. Vision checks cover independent codec
 vectors, sockaddr byte order, passthrough CRC/framing, ordered fragments,
-duplicates, sequence wrap, peer checks, cancellation, packet loss and cleanup.
+duplicates, sequence wrap, peer checks, cancellation, packet loss, interleaved
+BLE replies, video assembly, JPEG decode, queue overflow and camera cleanup.

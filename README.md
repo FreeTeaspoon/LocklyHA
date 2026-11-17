@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.8.0b2-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b2)
+[![Version](https://img.shields.io/badge/version-0.8.0b3-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b3)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -22,10 +22,11 @@ PPCS protocol. It uses Python asyncio, with no phone bridge or vendor binary.
 | Current lock state | Hardware reports locked |
 | Door circuit | Hardware reports closed, open-door transition pending |
 | Battery | Hardware voltage; HA percentage is an approximate AA voltage curve |
-| Lock and unlock | Unlock confirmed on PGD898S; relock confirmed by subsequent status, motor-completion handling added |
+| Lock and unlock | Both commands require a fresh hardware status confirmation |
 | Refresh status button | Sends one live status query, which can beep |
 | External keypad/app updates | Receiver implemented; push delivery unverified |
-| Camera video / audio | Not implemented |
+| Camera video | On-demand live JPEG/MJPEG, decoded locally from HEVC |
+| Camera audio / talk | Not implemented |
 | Guest PIN activation | Not verified on Vision |
 
 Account login supplies the hub ID and password. Only `LOCKLYV-number-suffix`
@@ -38,13 +39,18 @@ Startup and explicit refresh queries can beep. Successful startup queries are
 not repeated every 30 seconds. Hub reconnection uses hub-only login, which does
 not send a BLE command. Failed initial reads use the existing bounded retry
 policy. HA retains the last reading between updates; `last_status_update` on
-the lock shows when it was read. A command ACK can arrive before the motor finishes. The integration checks up
-to three fresh status readings after a mismatched ACK without replaying the
-physical command. A connected hub alone does not prove that a
+the lock shows when it was read. Action replies contain acceptance and event data, not the full status block.
+The integration confirms each action with up to three fresh status readings,
+without replaying the physical command. A connected hub alone does not prove that a
 reading is current. Use **Refresh status** when external changes have not arrived.
 
+The Camera entity starts video when viewed and disconnects ten seconds after
+image requests stop. It converts the hub's HEVC stream to 960 × 540 JPEG frames
+for Home Assistant's live MJPEG viewer. No separate RTSP server is needed.
+Audio, two-way talk and SD-card recordings are not exposed.
+
 For HACS, add `FreeTeaspoon/LocklyHA` as a custom Integration repository and
-select release `v0.8.0b2`. Replace the upstream installation first if present;
+select release `v0.8.0b3`. Replace the upstream installation first if present;
 keep the existing Lockly configuration entry, then restart HA so it loads the
 new Python modules. Existing device and entity IDs are preserved.
 

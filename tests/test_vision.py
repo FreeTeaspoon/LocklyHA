@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from custom_components.lockly import LocklyCoordinator
-from custom_components.lockly.api import crc8_lockly
+from custom_components.lockly.api import crc8_lockly, derive_aes_key, parse_action_ack
+from Crypto.Cipher import AES
 from custom_components.lockly.capabilities import resolve_capabilities
 from custom_components.lockly.vision import (
     VisionClient, VisionError, decode_packet, encode_packet, is_vision_lock,
@@ -88,6 +89,19 @@ class CodecTests(unittest.TestCase):
         with self.assertRaises(VisionError):
             unpack_bypass(malformed)
 
+    def test_action_reply_is_not_a_status_block(self):
+        mc, uid = "12345678", "aa0000000000000000000001"
+        for result in (0, 2, 3):
+            plain = bytes([result, 0x92, 0x12, 0x34]) + bytes(12)
+            payload = AES.new(derive_aes_key(mc, uid), AES.MODE_ECB).encrypt(plain)
+            body = b"\xa1\xb2\xc3\xd4" + struct.pack("<H", 25) + b"\x0a\x22" + payload
+            frame = body + bytes([crc8_lockly(body)])
+            parsed = parse_action_ack(frame.hex(), mc, uid)
+            self.assertEqual(bool(parsed), result == 0)
+            self.assertNotIn("firmware_version", parsed)
+            self.assertNotIn("is_locked", parsed)
+            self.assertFalse(parse_action_ack((frame[:-1] + bytes([frame[-1] ^ 1])).hex(), mc, uid))
+
     def test_vision_is_not_wifi_native(self):
         lock = {"p2pdid": UID, "p2ppw": "test-password", "hubid": ""}
         self.assertTrue(is_vision_lock(lock))
@@ -120,6 +134,27 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.deliver(1, message[100:])
         self.assertEqual(self.frames, [ble_frame()])
         self.assertEqual(len(self.transport.sent), 3)  # Every duplicate is ACKed.
+
+    async def test_video_uses_independent_sequences_and_acknowledges_duplicates(self):
+        videos = []
+        self.client._on_video = lambda *args: videos.append(args)
+        nal = b"\0\0\0\1\x40\x01" + bytes(150)
+        stream = struct.pack("<8I", 428213528, len(nal), 123, 1, 1, 1, 5, 0) + nal
+        def send(sequence, chunk):
+            self.client.datagram_received(wire(0xD0, b"\xd1\1" + struct.pack("!H", sequence) + chunk), PEER)
+        send(1, stream[80:])
+        send(0, stream[:80])
+        send(1, stream[80:])
+        self.assertEqual(videos, [(nal, 5, True)])
+        self.assertEqual(self.client._rx_sequence, 0)
+        self.assertEqual(self.client._video_sequence, 2)
+        self.assertEqual(len(self.transport.sent), 3)
+
+    async def test_malformed_video_size_closes_bounded_session(self):
+        self.client._on_video = lambda *args: None
+        payload = b"\xd1\1\0\0" + struct.pack("<8I", 428213528, 1048577, 0, 1, 1, 1, 5, 0)
+        self.client.datagram_received(wire(0xD0, payload), PEER)
+        self.assertFalse(self.client.connected)
 
     async def test_sequence_wrap(self):
         self.client._rx_sequence = 65535
@@ -180,6 +215,22 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.deliver(0, pack_control(33121, bypass()))
         self.assertEqual(await request, ble_frame())
         self.assertEqual(self.frames, [])  # Explicit reply isn't pushed twice.
+
+    async def test_delayed_status_does_not_satisfy_action_request(self):
+        self.client._connect = AsyncMock()
+        request = asyncio.create_task(self.client.async_exchange(ble_frame(), expected_command=0x22))
+        await asyncio.sleep(0)
+        def frame(command):
+            body = ble_frame()[:-1]
+            body = body[:6] + bytes([0x0A, command]) + body[8:]
+            return body + bytes([crc8_lockly(body)])
+        status, action = frame(0x1E), frame(0x22)
+        self.deliver(0, pack_control(33121, bypass(status)))
+        self.assertFalse(request.done())
+        self.assertEqual(self.frames, [status])
+        self.deliver(1, pack_control(33121, bypass(action)))
+        self.assertEqual(await request, action)
+        self.assertEqual(self.frames, [status])
 
     async def test_failed_command_has_no_fallback_or_replay(self):
         self.client._connect = AsyncMock()
@@ -258,10 +309,10 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         _caps_for=lambda _: caps,
                         _vision_exchange_raw=AsyncMock(side_effect=["pwd-reply", "command-reply"]),
                     )
-                    ack = {"is_locked": reported} if reported is not None else {}
+                    ack = {"command_accepted": True} if reported is not None else {}
                     with patch("custom_components.lockly.asyncio.sleep", AsyncMock()), \
                          patch("custom_components.lockly.parse_pwd_list_ack", return_value=None), \
-                         patch("custom_components.lockly.parse_ack", return_value=ack), \
+                         patch("custom_components.lockly.parse_action_ack", return_value=ack), \
                          patch("custom_components.lockly.build_lock_cmd", return_value="lock-frame") as lock_cmd, \
                          patch("custom_components.lockly.build_unlock_cmd", return_value="unlock-frame") as unlock_cmd:
                         accepted = await LocklyCoordinator._send_vision_command(coordinator, lock, unlock=unlock)
@@ -291,7 +342,7 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         _vision_exchange_raw=AsyncMock(return_value="command-reply"),
                     )
                     with patch("custom_components.lockly.asyncio.sleep", AsyncMock()), \
-                         patch("custom_components.lockly.parse_ack", return_value={"is_locked": unlock}):
+                         patch("custom_components.lockly.parse_action_ack", return_value={"command_accepted": True}):
                         accepted = await LocklyCoordinator._send_vision_command(coordinator, lock, unlock=unlock)
                     self.assertEqual(accepted, success)
                     self.assertEqual(coordinator._vision_exchange_raw.await_count, 1)

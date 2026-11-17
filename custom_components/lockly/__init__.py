@@ -43,6 +43,8 @@ from .api import (
     dedupe_credentials,
     describe_open_type,
     parse_ack,
+    parse_action_ack,
+    outgoing_ble_command,
     parse_lock_settings_ack,
     parse_set_auto_lock_ack,
     parse_set_lock_settings_ack,
@@ -100,7 +102,7 @@ def _rate_rssi(rssi: int | None) -> str:
         return "fair"
     return "weak"
 
-PLATFORMS = ["binary_sensor", "button", "lock", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "camera", "lock", "sensor"]
 
 # Per-lock fields set by something other than a status reading — the MQTT
 # battery push and the access-log poll — which a poll rebuilding a lock's data
@@ -584,10 +586,13 @@ class LocklyCoordinator(DataUpdateCoordinator):
         if lock_id in self._host_passwords:
             return self._host_passwords[lock_id]
 
-        entries = await api_query_passwords(
-            self._session, self.jwt, self.email, self.des3_key, lock,
-            nonce=nonce, caps=self._caps_for(lock),
-        )
+        if is_vision_lock(lock):
+            entries = await self._mqtt_credentials(lock, nonce)
+        else:
+            entries = await api_query_passwords(
+                self._session, self.jwt, self.email, self.des3_key, lock,
+                nonce=nonce, caps=self._caps_for(lock),
+            )
         if entries is None:
             # Do not cache a failure — a transient hub timeout should be retried.
             return None
@@ -680,20 +685,26 @@ class LocklyCoordinator(DataUpdateCoordinator):
         )
         return False
 
+    def _vision_client(self, lock: dict) -> VisionClient:
+        lock_id = lock["ID"]
+        client = self._vision_clients.get(lock_id)
+        if client is None:
+            client = VisionClient(
+                str(lock["p2pdid"]), str(lock["p2ppw"]),
+                lambda frame: self._vision_status_received(lock, frame),
+            )
+            self._vision_clients[lock_id] = client
+        return client
+
     async def _vision_exchange_raw(
         self, lock: dict, frame_hex: str, quiet: bool = False
     ) -> str | None:
         """Relay through the authenticated Vision hub, never through MQTT."""
         lock_id = lock["ID"]
         try:
-            client = self._vision_clients.get(lock_id)
-            if client is None:
-                client = VisionClient(
-                    str(lock["p2pdid"]), str(lock["p2ppw"]),
-                    lambda frame: self._vision_status_received(lock, frame),
-                )
-                self._vision_clients[lock_id] = client
-            return (await client.async_exchange(bytes.fromhex(frame_hex))).hex().upper()
+            client = self._vision_client(lock)
+            expected = outgoing_ble_command(frame_hex, str(lock["mc"]), lock_id)
+            return (await client.async_exchange(bytes.fromhex(frame_hex), expected_command=expected)).hex().upper()
         except (VisionError, OSError) as exc:
             log = _LOGGER.debug if quiet else _LOGGER.warning
             log("Lockly Vision: %s", exc)
@@ -701,6 +712,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
 
     def _vision_status_received(self, lock: dict, frame: bytes) -> None:
         """Merge unsolicited lock status without waking the lock on each poll."""
+        if frame[6:8] != b"\x0a\x1e":
+            return
         status = parse_ack(frame.hex(), str(lock["mc"]), lock["ID"])
         if status and "lock_type" in status:
             self._learn_from_status(lock, status)
@@ -738,16 +751,11 @@ class LocklyCoordinator(DataUpdateCoordinator):
         builder = build_unlock_cmd if unlock else build_lock_cmd
         frame = builder(str(lock["mc"]), lock["ID"], password, nonce, caps=self._caps_for(lock))
         ack = await self._vision_exchange_raw(lock, frame)
-        accepted = parse_ack(ack, str(lock["mc"]), lock["ID"]) if ack else None
+        # Action and status replies have different layouts. A valid action
+        # reply confirms acceptance; only QueryLockStatus confirms bolt state.
+        accepted = parse_action_ack(ack, str(lock["mc"]), lock["ID"]) if ack else None
         if not accepted:
             return False
-        self._learn_from_status(lock, accepted)
-        self._publish_status(lock, accepted)
-        # The command ACK can precede motor completion. A PGD898S relock ACK
-        # still reported unlocked, then a status read 350 ms later was locked.
-        # Confirm with bounded read-only queries, never another lock command.
-        if accepted.get("is_locked") is (not unlock):
-            return True
         for _ in range(3):
             await asyncio.sleep(0.5)
             confirmed = await self._query_live_status(lock, quiet=True)
@@ -1115,11 +1123,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         Only the first page: the host credential lives in slot 0, so paging for
         the rest would wake the lock repeatedly for data this path does not use.
         """
-        mqtt = getattr(self, "_mqtt_manager", None)
-        if mqtt is None:
-            return None
         frame = build_query_pwd_cmd(str(lock["mc"]), lock["ID"], 0, nonce)
-        ack = await mqtt.async_exchange_frame(lock["ID"], frame)
+        ack = await self._mqtt_exchange_raw(lock, frame)
         if not ack:
             return None
         parsed = parse_pwd_list_ack(
@@ -1252,6 +1257,11 @@ class LocklyCoordinator(DataUpdateCoordinator):
         caps = self._caps_for(lock)
         cutoff = self._history_cutoff_ms()
 
+        if is_vision_lock(lock):
+            # This firmware rejects the paged BLE history query. Keep cloud
+            # history, and do not send this lock through the Secure LINK relay.
+            _LOGGER.debug("Lockly Vision: direct access-log query is not supported")
+            return
         if lock_id in self._prefer_paged_log:
             records = None
         else:

@@ -1,6 +1,6 @@
 """Vision Connect's CS2/PPCS transport, traced from Lockly Home 1.6.2.
 
-Only the control channel is opened. No native SDK or phone process is needed.
+No native SDK or phone process is needed.
 Cloud lookup finds the hub's current UDP port, then the authenticated session
 carries the same BLE frames used by the integration's other transports.
 """
@@ -124,12 +124,20 @@ class VisionClient(asyncio.DatagramProtocol):
     datagram. An application command is never replayed after a reconnect.
     """
 
-    def __init__(self, uid: str, password: str, on_frame: Callable[[bytes], None] | None = None) -> None:
+    def __init__(
+        self, uid: str, password: str, on_frame: Callable[[bytes], None] | None = None,
+        on_video: Callable[[bytes, int, bool], None] | None = None,
+    ) -> None:
         self._uid = pack_uid(uid)
         self._password = password.encode()
         if not self._password or len(self._password) > 72:
             raise VisionError("Invalid Vision hub credential length")
         self._on_frame = on_frame
+        self._on_video = on_video
+        self._video_sequence = 0
+        self._video_chunks: dict[int, bytes] = {}
+        self._video_stream = bytearray()
+        self._token = b""
         self._lock = asyncio.Lock()
         self._transport: asyncio.DatagramTransport | None = None
         self._peer: tuple[str, int] | None = None
@@ -138,6 +146,7 @@ class VisionClient(asyncio.DatagramProtocol):
         self._ready: asyncio.Future | None = None
         self._reply: asyncio.Future | None = None
         self._expected: set[int] = set()
+        self._expected_ble: int | None = None
         self._maintenance: asyncio.Task | None = None
         self._pending: dict[int, tuple[bytes, float, int]] = {}
         self._sequence = 0
@@ -209,8 +218,8 @@ class VisionClient(asyncio.DatagramProtocol):
                             self._pending.pop(int.from_bytes(payload[offset:offset + 2], "big"), None)
             elif kind == 0xD0:
                 self._receive_data(payload)
-        except (VisionError, ValueError, struct.error):
-            self._fail("Invalid Vision control response")
+        except (VisionError, ValueError, struct.error) as exc:
+            self._fail(f"Invalid Vision control response: {exc}")
 
     def _handshake(self, kind: int, payload: bytes, address: tuple[str, int]) -> None:
         if address in self._servers:
@@ -238,9 +247,13 @@ class VisionClient(asyncio.DatagramProtocol):
         if len(payload) < 4 or payload[0] != 0xD1:
             return
         channel, sequence = payload[1], int.from_bytes(payload[2:4], "big")
-        if channel != 0:
+        if channel not in (0, 1):
             return
         self._send(0xD1, payload[:2] + b"\x00\x01" + payload[2:4])
+        if channel == 1:
+            if self._on_video:
+                self._receive_video(sequence, payload[4:])
+            return
         distance = (sequence - self._rx_sequence) & 0xFFFF
         if distance >= _WINDOW:
             return  # Old duplicate or outside the bounded reorder window.
@@ -259,9 +272,57 @@ class VisionClient(asyncio.DatagramProtocol):
             body = bytes(self._stream[24:24 + size])
             del self._stream[:24 + size]
             if command in self._expected and self._reply is not None and not self._reply.done():
+                if self._expected_ble is not None:
+                    frame = unpack_bypass(body)
+                    if frame[7] != self._expected_ble:
+                        if self._authenticated and self._on_frame:
+                            self._on_frame(frame)
+                        continue
                 self._reply.set_result(body)
             elif command in (33117, 33119, 33121) and self._authenticated and self._on_frame:
                 self._on_frame(unpack_bypass(body))
+
+    def _receive_video(self, sequence: int, data: bytes) -> None:
+        if (sequence - self._video_sequence) & 0xFFFF >= _WINDOW:
+            return
+        self._video_chunks.setdefault(sequence, data)
+        while self._video_sequence in self._video_chunks:
+            self._video_stream.extend(self._video_chunks.pop(self._video_sequence))
+            self._video_sequence = (self._video_sequence + 1) & 0xFFFF
+        if len(self._video_stream) > 1048576 + 32:
+            raise VisionError("Vision video buffer exceeded")
+        while len(self._video_stream) >= 32:
+            flag, size, _pts, frame_type, _count, _online, codec, _reserved = struct.unpack_from(
+                "<8I", self._video_stream
+            )
+            if flag not in (428213528, 428216305, 428216306, 553649432, 428213536) or size > 1048576:
+                raise VisionError("Invalid Vision video frame")
+            if len(self._video_stream) < 32 + size:
+                break
+            frame = bytes(self._video_stream[32:32 + size])
+            del self._video_stream[:32 + size]
+            if flag in (428213528, 428216305) and self._on_video:
+                self._on_video(frame, codec, frame_type == 1)
+
+    async def async_hub_request(self, command: int, payload: bytes, expected: set[int]) -> bytes:
+        """Send one authenticated camera/hub request, without BLE passthrough."""
+        async with self._lock:
+            await self._connect()
+            return await self._request(command, payload, expected)
+
+    async def async_start_video(self) -> None:
+        async with self._lock:
+            await self._connect()
+            # This is the app's StartLive request: second stream, video, channel
+            # zero, ordinary live view. The response reports codecs and size.
+            response = await self._request(1, struct.pack("<5I", 2, 0, 0, 0, 0), {2})
+            if len(response) < 20:
+                raise VisionError("Invalid Vision live video response")
+
+    async def async_stop_video(self) -> None:
+        if self.connected:
+            async with self._lock:
+                await self._request(3, struct.pack("<2I", 0, 0), {3, 19})
 
     async def _maintain(self) -> None:
         last_alive = 0.0
@@ -299,6 +360,9 @@ class VisionClient(asyncio.DatagramProtocol):
         self._sequence = self._rx_sequence = 0
         self._chunks.clear()
         self._stream.clear()
+        self._video_sequence = 0
+        self._video_chunks.clear()
+        self._video_stream.clear()
         resolutions = await asyncio.gather(*(
             loop.getaddrinfo(host, 32100, family=socket.AF_INET, type=socket.SOCK_DGRAM)
             for host in _CLOUD_HOSTS
@@ -329,6 +393,7 @@ class VisionClient(asyncio.DatagramProtocol):
             response = await self._request(16, self._password.ljust(72, b"\x00"), {16})
             if len(response) < 20 or struct.unpack_from("<i", response)[0]:
                 raise VisionError("Vision hub rejected its stored credential")
+            self._token = response[4:20]
             self._authenticated = True
         except BaseException:
             await self._disconnect()
@@ -341,10 +406,13 @@ class VisionClient(asyncio.DatagramProtocol):
                     self._ready.exception()
                 self._ready = None
 
-    async def _request(self, command: int, payload: bytes, expected: set[int]) -> bytes:
+    async def _request(
+        self, command: int, payload: bytes, expected: set[int], expected_ble: int | None = None,
+    ) -> bytes:
         loop = asyncio.get_running_loop()
         self._reply = loop.create_future()
         self._expected = expected
+        self._expected_ble = expected_ble
         message = pack_control(command, payload)
         try:
             for offset in range(0, len(message), 1024):
@@ -362,16 +430,17 @@ class VisionClient(asyncio.DatagramProtocol):
             raise
         finally:
             self._expected = set()
+            self._expected_ble = None
             self._reply = None
 
-    async def async_exchange(self, frame: bytes, channel: int = 0) -> bytes:
+    async def async_exchange(self, frame: bytes, channel: int = 0, expected_command: int | None = None) -> bytes:
         """Send one BLE frame. Never automatically replay it after failure."""
         if not 1 <= len(frame) <= 100:
             raise VisionError("Vision short control frame exceeds 100 bytes")
         async with self._lock:
             await self._connect()
             payload = struct.pack("<4I", 2, channel, 0, len(frame)) + frame.ljust(100, b"\x00")
-            response = await self._request(33118, payload, {33117, 33119, 33121})
+            response = await self._request(33118, payload, {33117, 33119, 33121}, expected_command)
             return unpack_bypass(response)
 
     async def async_connect(self) -> None:
