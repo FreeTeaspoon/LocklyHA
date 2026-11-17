@@ -1,7 +1,7 @@
 {
   "domain": "lockly",
   "name": "Lockly",
-  "version": "0.8.0b3",
+  "version": "0.8.0b4",
   "documentation": "https://github.com/FreeTeaspoon/LocklyHA",
   "issue_tracker": "https://github.com/FreeTeaspoon/LocklyHA/issues",
   "requirements": [

@@ -255,11 +255,22 @@ class LockCapabilities:
         return self.lock_type in _500_GROUP_PASSWORD
 
     @property
+    def vision_uses_nonce(self) -> bool:
+        """PGD898S 2.01.96 accepts the AES-5 nonce path, rejects AES-11 with F3.
+
+        The current app's general Vision timestamp rule does not work on this
+        firmware. Keep the exception limited to the model/version tested.
+        """
+        return self.lock_type == 97 and self.firmware in {"2.01.96", "00960102"}
+
+    @property
     def supports_timestamp(self) -> bool:
         """isSupportTimestamp(): nonce field carries a timestamp, not the stored value.
 
         ``(isHost() && isVision()) || (isSupport82Cmd() && !isPGI301())``
         """
+        if self.vision_uses_nonce:
+            return False
         if self.is_host and self.is_vision:
             return True
         return self.supports_82_cmd and self.lock_type != _PGI301
@@ -320,6 +331,8 @@ class LockCapabilities:
         QueryPwd147 stay at 5: QueryPwd147Cmd asks getTenantAccessEncryptType(),
         which falls straight through to getEncryptType() for a host.
         """
+        if self.vision_uses_nonce:
+            return 5
         if self.supports_82_cmd:
             return 11 if self.is_host else 12
         if self.is_host and self.is_vision:

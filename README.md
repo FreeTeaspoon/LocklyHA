@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.8.0b3-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b3)
+[![Version](https://img.shields.io/badge/version-0.8.0b4-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b4)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -50,7 +50,7 @@ for Home Assistant's live MJPEG viewer. No separate RTSP server is needed.
 Audio, two-way talk and SD-card recordings are not exposed.
 
 For HACS, add `FreeTeaspoon/LocklyHA` as a custom Integration repository and
-select release `v0.8.0b3`. Replace the upstream installation first if present;
+select release `v0.8.0b4`. Replace the upstream installation first if present;
 keep the existing Lockly configuration entry, then restart HA so it loads the
 new Python modules. Existing device and entity IDs are preserved.
 

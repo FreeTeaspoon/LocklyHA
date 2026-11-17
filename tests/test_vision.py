@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from custom_components.lockly import LocklyCoordinator
 from custom_components.lockly.api import crc8_lockly, derive_aes_key, parse_action_ack
 from Crypto.Cipher import AES
-from custom_components.lockly.capabilities import resolve_capabilities
+from custom_components.lockly.capabilities import LockCapabilities, resolve_capabilities
 from custom_components.lockly.vision import (
     VisionClient, VisionError, decode_packet, encode_packet, is_vision_lock,
     pack_address, pack_control, pack_uid, unpack_address, unpack_bypass,
@@ -108,6 +108,16 @@ class CodecTests(unittest.TestCase):
         self.assertFalse(LocklyCoordinator._mqtt_only(lock))
         self.assertTrue(LocklyCoordinator._mqtt_only({"hubid": ""}))
         self.assertFalse(is_vision_lock({"hubid": "PGH220-test"}))
+
+    def test_pgd898s_verified_firmware_uses_nonce_and_aes5(self):
+        for firmware in ("2.01.96", "00960102"):
+            caps = LockCapabilities(lock_type=97, firmware=firmware)
+            self.assertFalse(caps.supports_timestamp)
+            self.assertEqual(caps.encrypt_type, 5)
+            self.assertEqual(caps.slot_id, 0)
+        caps = LockCapabilities(lock_type=97, firmware="unknown")
+        self.assertTrue(caps.supports_timestamp)
+        self.assertEqual(caps.encrypt_type, 11)
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):

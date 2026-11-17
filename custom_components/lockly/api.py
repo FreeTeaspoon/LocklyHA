@@ -1038,6 +1038,7 @@ async def api_query_lock_status(
 _BLE_ERRORS = {
     "F0": "too many 4-digit access codes (max 10; use 5-8 digits)",
     "F1": "battery too low for an OTA update",
+    "F3": "command freshness check failed — obtain a fresh nonce",
     "F5": "Bluetooth connection problem — try again later",
     "F8": "cannot change the password",
     "F9": "this credential's valid time period has not started yet",

@@ -21,6 +21,12 @@ commands require an accepted action reply followed by a real status query
 confirming the requested bolt state, with up to three queries 500 ms apart.
 Delayed responses are matched by BLE command before satisfying a request.
 
+PGD898S cloud firmware 2.01.96, raw status version 00960102, requires AES type 5
+and the fresh status nonce. The current app's general Vision rule selects type
+11 and an epoch timestamp; that path returns F3 on this firmware. The exception
+is limited to the tested model/version. An accepted unlock was observed changing
+the bolt state on the next status query, followed by a confirmed relock.
+
 The camera's HEVC frames decode successfully to live JPEG images. Camera and
 status sessions were verified concurrently. Open-door transitions and external
 keypad/app notifications remain unverified. The hub cache query returns an
