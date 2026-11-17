@@ -251,7 +251,7 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
             for reported in (False, True, None):
                 with self.subTest(unlock=unlock, reported=reported):
                     coordinator = SimpleNamespace(
-                        _query_live_status=AsyncMock(return_value={"is_locked": True}),
+                        _query_live_status=AsyncMock(return_value={"is_locked": reported}),
                         _learn_from_status=lambda *args: None,
                         _publish_status=lambda *args: None,
                         _nonces={}, _host_passwords={},
@@ -259,7 +259,8 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         _vision_exchange_raw=AsyncMock(side_effect=["pwd-reply", "command-reply"]),
                     )
                     ack = {"is_locked": reported} if reported is not None else {}
-                    with patch("custom_components.lockly.parse_pwd_list_ack", return_value=None), \
+                    with patch("custom_components.lockly.asyncio.sleep", AsyncMock()), \
+                         patch("custom_components.lockly.parse_pwd_list_ack", return_value=None), \
                          patch("custom_components.lockly.parse_ack", return_value=ack), \
                          patch("custom_components.lockly.build_lock_cmd", return_value="lock-frame") as lock_cmd, \
                          patch("custom_components.lockly.build_unlock_cmd", return_value="unlock-frame") as unlock_cmd:
@@ -268,6 +269,34 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         selected = unlock_cmd if unlock else lock_cmd
                         self.assertEqual(selected.call_args.args[2], lock["hc"])
                         self.assertEqual(coordinator._vision_exchange_raw.await_count, 2)
+
+    async def test_motor_completion_is_confirmed_without_replaying_command(self):
+        lock = {"ID": "aa0000000000000000000001", "mc": "12345678", "hc": "123456",
+                "mod": "PGD898S", "p2pdid": UID, "p2ppw": "test-password"}
+        for unlock in (False, True):
+            for readings, success, queries in [
+                ([{"is_locked": unlock}, {"is_locked": not unlock}], True, 3),
+                ([None, {"is_locked": not unlock}], True, 3),
+                ([None, None, None], False, 4),
+                ([{"is_locked": unlock}] * 3, False, 4),
+            ]:
+                with self.subTest(unlock=unlock, success=success, readings=readings):
+                    published = []
+                    coordinator = SimpleNamespace(
+                        _query_live_status=AsyncMock(side_effect=[{"is_locked": unlock}, *readings]),
+                        _learn_from_status=lambda *args: None,
+                        _publish_status=lambda _, status: published.append(status),
+                        _nonces={}, _host_passwords={lock["ID"]: "123456"},
+                        _caps_for=lambda _: resolve_capabilities(lock),
+                        _vision_exchange_raw=AsyncMock(return_value="command-reply"),
+                    )
+                    with patch("custom_components.lockly.asyncio.sleep", AsyncMock()), \
+                         patch("custom_components.lockly.parse_ack", return_value={"is_locked": unlock}):
+                        accepted = await LocklyCoordinator._send_vision_command(coordinator, lock, unlock=unlock)
+                    self.assertEqual(accepted, success)
+                    self.assertEqual(coordinator._vision_exchange_raw.await_count, 1)
+                    self.assertEqual(coordinator._query_live_status.await_count, queries)
+                    self.assertEqual(published[-1]["is_locked"], not unlock if success else unlock)
 
     async def test_no_status_prevents_actuation(self):
         coordinator = SimpleNamespace(_query_live_status=AsyncMock(return_value=None))

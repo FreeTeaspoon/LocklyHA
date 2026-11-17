@@ -14,8 +14,12 @@ Live status was verified on PGD898S, lock type 97, T21 hub firmware 0228,
 camera firmware 0098. Lock firmware reports 00960102. It returned a locked
 bolt, closed door circuit, and an AA battery voltage around 5.2 V.
 
-Physical lock/unlock commands, open-door transitions and unsolicited updates
-have not yet been verified. The credential-list query returned no usable host
+One HA unlock was confirmed on hardware. The immediate relock ACK still
+reported unlocked, but a status query 350 ms later confirmed locked. The
+integration now waits for motor completion with up to three read-only status
+queries, spaced 500 ms apart. This timing correction has offline regression
+coverage; the physical cycle has not been repeated after the correction.
+Open-door transitions and unsolicited updates have not yet been verified. The credential-list query returned no usable host
 entry on this hardware; commands can use the authenticated account's cloud
 host-credential copy instead. Video/audio and guest PIN activation are outside
 the validated support in this release.
@@ -59,7 +63,9 @@ keepalive do not send BLE frames.
 
 Each lock's HA lock/unlock calls are serialized. A command first obtains status,
 learns type/nonce, resolves the host credential, builds the existing Vision BLE
-command, then requires a parsed ACK reporting the requested bolt state. A
+command, then requires a parsed ACK or a subsequent status read reporting the requested
+bolt state. Confirmation queries are bounded and never resend the physical
+command. A
 successful UDP send or relay result alone does not count as successful locking.
 
 ## Checks

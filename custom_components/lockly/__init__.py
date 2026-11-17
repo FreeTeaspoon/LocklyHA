@@ -743,9 +743,20 @@ class LocklyCoordinator(DataUpdateCoordinator):
             return False
         self._learn_from_status(lock, accepted)
         self._publish_status(lock, accepted)
-        # Preserve the hardware-confirmed status instead of assuming a thrown
-        # bolt merely because the hub relayed the frame.
-        return accepted.get("is_locked") is (not unlock)
+        # The command ACK can precede motor completion. A PGD898S relock ACK
+        # still reported unlocked, then a status read 350 ms later was locked.
+        # Confirm with bounded read-only queries, never another lock command.
+        if accepted.get("is_locked") is (not unlock):
+            return True
+        for _ in range(3):
+            await asyncio.sleep(0.5)
+            confirmed = await self._query_live_status(lock, quiet=True)
+            if confirmed:
+                self._learn_from_status(lock, confirmed)
+                self._publish_status(lock, confirmed)
+                if confirmed.get("is_locked") is (not unlock):
+                    return True
+        return False
 
     async def _mqtt_exchange_raw(
         self, lock: dict, frame_hex: str, quiet: bool = False
