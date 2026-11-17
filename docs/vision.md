@@ -18,7 +18,7 @@ Control uses separate parsers for action replies and status replies. An
 `0A22` action reply has a result/status/event layout; treating it as a full
 `0A1E` status report invents battery, firmware and door fields. Successful
 commands require an accepted action reply followed by a real status query
-confirming the requested bolt state, with up to three queries 500 ms apart.
+confirming the requested bolt state, with up to six queries 750 ms apart.
 Delayed responses are matched by BLE command before satisfying a request.
 
 PGD898S cloud firmware 2.01.96, raw status version 00960102, requires AES type 5

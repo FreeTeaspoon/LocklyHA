@@ -317,7 +317,7 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         _publish_status=lambda *args: None,
                         _nonces={}, _host_passwords={},
                         _caps_for=lambda _: caps,
-                        _vision_exchange_raw=AsyncMock(side_effect=["pwd-reply", "command-reply"]),
+                        _vision_exchange_raw=AsyncMock(return_value="command-reply"),
                     )
                     ack = {"command_accepted": True} if reported is not None else {}
                     with patch("custom_components.lockly.asyncio.sleep", AsyncMock()), \
@@ -329,7 +329,7 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(accepted, reported is (not unlock))
                         selected = unlock_cmd if unlock else lock_cmd
                         self.assertEqual(selected.call_args.args[2], lock["hc"])
-                        self.assertEqual(coordinator._vision_exchange_raw.await_count, 2)
+                        self.assertEqual(coordinator._vision_exchange_raw.await_count, 1)
 
     async def test_motor_completion_is_confirmed_without_replaying_command(self):
         lock = {"ID": "aa0000000000000000000001", "mc": "12345678", "hc": "123456",
@@ -338,8 +338,9 @@ class CoordinatorCommandTests(unittest.IsolatedAsyncioTestCase):
             for readings, success, queries in [
                 ([{"is_locked": unlock}, {"is_locked": not unlock}], True, 3),
                 ([None, {"is_locked": not unlock}], True, 3),
-                ([None, None, None], False, 4),
-                ([{"is_locked": unlock}] * 3, False, 4),
+                ([None] * 6, False, 7),
+                ([{"is_locked": unlock}] * 6, False, 7),
+                ([{"is_locked": unlock}] * 5 + [{"is_locked": not unlock}], True, 7),
             ]:
                 with self.subTest(unlock=unlock, success=success, readings=readings):
                     published = []

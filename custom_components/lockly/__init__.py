@@ -731,8 +731,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._learn_from_status(lock, status)
         self._publish_status(lock, status)
         nonce = self._nonces.get(lock["ID"])
-        password = self._host_passwords.get(lock["ID"])
-        if password is None:
+        password = self._host_passwords.get(lock["ID"]) or str(lock.get("hc") or "")
+        if not password:
             query = build_query_pwd_cmd(str(lock["mc"]), lock["ID"], 0, nonce)
             ack = await self._vision_exchange_raw(lock, query)
             if ack:
@@ -755,15 +755,18 @@ class LocklyCoordinator(DataUpdateCoordinator):
         # reply confirms acceptance; only QueryLockStatus confirms bolt state.
         accepted = parse_action_ack(ack, str(lock["mc"]), lock["ID"]) if ack else None
         if not accepted:
+            if ack and len(ack) == 20 and ack[12:14].upper() == "0C":
+                _LOGGER.warning("Lockly Vision action rejected, BLE error 0x%s", ack[16:18])
             return False
-        for _ in range(3):
-            await asyncio.sleep(0.5)
+        for _ in range(6):
+            await asyncio.sleep(0.75)
             confirmed = await self._query_live_status(lock, quiet=True)
             if confirmed:
                 self._learn_from_status(lock, confirmed)
                 self._publish_status(lock, confirmed)
                 if confirmed.get("is_locked") is (not unlock):
                     return True
+        _LOGGER.warning("Lockly Vision action accepted but hardware did not confirm the requested bolt state")
         return False
 
     async def _mqtt_exchange_raw(

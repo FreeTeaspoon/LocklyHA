@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.8.0b4-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b4)
+[![Version](https://img.shields.io/badge/version-0.8.0b5-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b5)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -40,7 +40,7 @@ not repeated every 30 seconds. Hub reconnection uses hub-only login, which does
 not send a BLE command. Failed initial reads use the existing bounded retry
 policy. HA retains the last reading between updates; `last_status_update` on
 the lock shows when it was read. Action replies contain acceptance and event data, not the full status block.
-The integration confirms each action with up to three fresh status readings,
+The integration confirms each action with up to six fresh status readings,
 without replaying the physical command. A connected hub alone does not prove that a
 reading is current. Use **Refresh status** when external changes have not arrived.
 
@@ -50,7 +50,7 @@ for Home Assistant's live MJPEG viewer. No separate RTSP server is needed.
 Audio, two-way talk and SD-card recordings are not exposed.
 
 For HACS, add `FreeTeaspoon/LocklyHA` as a custom Integration repository and
-select release `v0.8.0b4`. Replace the upstream installation first if present;
+select release `v0.8.0b5`. Replace the upstream installation first if present;
 keep the existing Lockly configuration entry, then restart HA so it loads the
 new Python modules. Existing device and entity IDs are preserved.
 
