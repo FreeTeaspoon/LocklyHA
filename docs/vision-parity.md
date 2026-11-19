@@ -31,7 +31,10 @@ with every Lockly model or every Lockly Home feature.
 
 Settings are read before every change. The write changes only the selected bit;
 a subsequent hardware reading must match. PIN operations read the complete list
-before and after writing and verify that every other entry is unchanged. Writes
+before and after writing and verify that every other entry is unchanged.
+Edit/delete requests include an ephemeral keyed revision token, so a stale card
+cannot change a slot that was reused or changed in Lockly Home. A restart requires
+a fresh read before editing. The token is not an unkeyed hash of the PIN. Writes
 are never automatically replayed after an uncertain result. A rejected operation
 must be reviewed with Refresh before retrying.
 
@@ -98,7 +101,7 @@ integration stops capture 10 seconds after its last frame request.
 
 ## Access card setup
 
-Add `/lockly/management-card.js?v=0.9.0b1` as a JavaScript module under dashboard
+Add `/lockly/management-card.js?v=0.9.0b2` as a JavaScript module under dashboard
 resources. Add a manual card:
 
 ```yaml

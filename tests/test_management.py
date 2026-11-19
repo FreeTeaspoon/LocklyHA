@@ -137,6 +137,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(records[0]["tm"], int(datetime(2026, 11, 20, 1, tzinfo=timezone.utc).timestamp() * 1000))
         self.assertEqual(records[0]["pid"], 7)
         self.assertEqual(records[0]["id"], 42)
+        no_user = reply(0x78, b"\0" + stamp + bytes([1, 255, 0, 43, 0]))
+        records = parse_log_ack(no_user, MC, UUID, LockCapabilities(lock_type=97), "Asia/Hong_Kong")
+        self.assertIsNone(records[0]["pid"])
 
 
 class TransactionTests(unittest.IsolatedAsyncioTestCase):
@@ -179,8 +182,22 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         self.manager.read_credentials = AsyncMock(side_effect=[[OWNER, GUEST], [OWNER, edited]])
         echoed = bytes(int(d) for d in GUEST.pin) + b"\x07" + GUEST.schedule
         self.coordinator._vision_exchange_raw.return_value = reply(1, echoed, 0x14)
-        await self.manager.async_save_pin(UUID, "Renamed", "", {"type": "always"}, 7)
+        await self.manager.async_save_pin(UUID, "Renamed", "", {"type": "always"}, 7, self.manager.revision(GUEST))
         self.assertEqual(self.coordinator._vision_exchange_raw.await_count, 1)
+
+    async def test_stale_card_cannot_modify_a_reused_slot(self):
+        self.manager.read_credentials = AsyncMock(return_value=[OWNER, GUEST])
+        for token in (None, "stale", self.manager.revision(Credential(3, 7, "783892", GUEST.schedule, "Old"))):
+            with self.assertRaises(ManagementError):
+                await self.manager.async_delete_pin(UUID, 7, token)
+            with self.assertRaises(ManagementError):
+                await self.manager.async_save_pin(UUID, "Test", "", {"type": "always"}, 7, token)
+        self.coordinator._vision_exchange_raw.assert_not_awaited()
+
+    def test_revision_does_not_reveal_a_pin_and_changes_after_restart(self):
+        token = self.manager.revision(GUEST)
+        self.assertRegex(token, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(token, VisionManagement(self.coordinator).revision(GUEST))
 
     async def test_uncertain_write_reads_but_never_replays(self):
         self.manager.read_credentials = AsyncMock(side_effect=[[OWNER, GUEST], [OWNER, GUEST]])

@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import hmac
+import hashlib
+import secrets
 from zoneinfo import ZoneInfo
 
 from Crypto.Cipher import AES
@@ -198,6 +200,7 @@ class VisionManagement:
 
     def __init__(self, coordinator) -> None:
         self.coordinator = coordinator
+        self._revision_key = secrets.token_bytes(32)
         self.settings: dict[str, dict[int, int]] = {}
         self.credentials: dict[str, list[dict]] = {}
         self.history: dict[str, list[dict]] = {}
@@ -231,7 +234,7 @@ class VisionManagement:
     async def read_credentials(self, lock: dict, nonce: str) -> list[Credential]:
         ack = await self.exchange(lock, 0x2D, nonce)
         entries = parse_credentials(ack, str(lock["mc"]), lock["ID"])
-        self.credentials[lock["ID"]] = [e.public() for e in entries]
+        self.credentials[lock["ID"]] = [{**e.public(), "revision": self.revision(e)} for e in entries]
         return entries
 
     async def read_settings(self, lock: dict, nonce: str) -> dict[int, int]:
@@ -288,7 +291,16 @@ class VisionManagement:
     def signature(entry: Credential) -> tuple:
         return entry.user_type, entry.slot, entry.pin, entry.schedule, entry.name
 
-    async def async_save_pin(self, lock_id: str, name: str, pin: str, schedule: dict, slot: int | None = None) -> dict:
+    def revision(self, entry: Credential) -> str:
+        # An ephemeral keyed token, not a brute-forceable hash of a short PIN.
+        return hmac.new(self._revision_key, repr(self.signature(entry)).encode(), hashlib.sha256).hexdigest()
+
+    def verify_revision(self, entry: Credential, expected: str | None) -> None:
+        if not expected or not hmac.compare_digest(self.revision(entry), expected):
+            raise ManagementError("This entry changed or the integration restarted. Refresh before changing it")
+
+    async def async_save_pin(self, lock_id: str, name: str, pin: str, schedule: dict, slot: int | None = None,
+                             expected_revision: str | None = None) -> dict:
         lock = self.lock(lock_id)
         if pin or slot is None:
             validate_pin(pin)
@@ -305,6 +317,7 @@ class VisionManagement:
                 old = next((e for e in before if e.slot == slot), None)
                 if old is None or not old.public()["editable"]:
                     raise ManagementError("Select an existing editable PIN")
+                self.verify_revision(old, expected_revision)
             if not pin:
                 pin = old.pin
             if any(e.slot != slot and hmac.compare_digest(e.pin, pin) for e in before):
@@ -329,7 +342,7 @@ class VisionManagement:
                 != {cls.signature(e) for e in after if e.slot != slot}):
             raise ManagementError("Another credential changed during the operation; review access in Lockly Home")
 
-    async def async_delete_pin(self, lock_id: str, slot: int) -> dict:
+    async def async_delete_pin(self, lock_id: str, slot: int, expected_revision: str | None = None) -> dict:
         lock = self.lock(lock_id)
         async with self.mutex(lock):
             nonce = await self.nonce(lock)
@@ -337,6 +350,7 @@ class VisionManagement:
             old = next((e for e in before if e.slot == slot), None)
             if old is None:
                 raise ManagementError("That credential no longer exists")
+            self.verify_revision(old, expected_revision)
             frame = build_delete_pin(str(lock["mc"]), lock_id, nonce, old)
             ack = await self.coordinator._vision_exchange_raw(lock, frame)
             after = await self.read_credentials(lock, await self.nonce(lock))

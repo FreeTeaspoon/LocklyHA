@@ -118,7 +118,7 @@ class LocklyManagementCard extends HTMLElement {
         const actions = document.createElement("div"); actions.className = "actions";
         const edit = document.createElement("button"); edit.textContent = "Edit"; edit.onclick = () => this.edit(entry);
         const remove = document.createElement("button"); remove.textContent = "Delete";
-        remove.onclick = () => { if (confirm(`Delete ${entry.name} (slot ${entry.slot}) from the lock?`)) this.run("delete_pin", {slot: entry.slot}); };
+        remove.onclick = () => { if (confirm(`Delete ${entry.name} (slot ${entry.slot}) from the lock?`)) this.run("delete_pin", {slot: entry.slot, revision: entry.revision}); };
         actions.append(edit, remove); row.append(actions);
       }
       this.$("credentials").append(row);
@@ -138,7 +138,7 @@ class LocklyManagementCard extends HTMLElement {
     return `${days.join(", ")} ${s.start}–${s.end}`;
   }
   edit(entry) {
-    this.editingSlot = entry?.slot;
+    this.editingSlot = entry?.slot; this.editingRevision = entry?.revision;
     this.$("editor").reset(); this.$("editor").hidden = false;
     this.$("form-title").textContent = entry ? `Edit ${entry.name}` : "Add PIN";
     this.$("name").value = entry?.name || ""; this.$("pin").required = !entry;
@@ -166,7 +166,7 @@ class LocklyManagementCard extends HTMLElement {
       schedule.start = this.$("time-start").value; schedule.end = this.$("time-end").value;
     }
     const values = {name: this.$("name").value, pin: this.$("pin").value, schedule};
-    if (this.editingSlot !== undefined) values.slot = this.editingSlot;
+    if (this.editingSlot !== undefined) { values.slot = this.editingSlot; values.revision = this.editingRevision; }
     this.$("pin").value = "";
     if (await this.run("save_pin", values)) this.closeEditor();
     values.pin = "";

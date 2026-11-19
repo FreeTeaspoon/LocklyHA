@@ -30,6 +30,7 @@ async def async_setup_management(hass: HomeAssistant) -> None:
     vol.Optional("enabled"): bool,
     vol.Optional("name"): str,
     vol.Optional("pin", default=""): str,
+    vol.Optional("revision"): str,
     vol.Optional("slot"): vol.All(int, vol.Range(min=1, max=255)),
     vol.Optional("schedule"): dict,
 })
@@ -61,9 +62,10 @@ async def websocket_management(hass, connection, msg):
         elif action == "setting":
             result = await manager.async_setting(lock_id, msg["key"], msg["enabled"])
         elif action == "save_pin":
-            result = await manager.async_save_pin(lock_id, msg["name"], msg["pin"], msg["schedule"], msg.get("slot"))
+            result = await manager.async_save_pin(
+                lock_id, msg["name"], msg["pin"], msg["schedule"], msg.get("slot"), msg.get("revision"))
         elif action == "delete_pin":
-            await manager.async_delete_pin(lock_id, msg["slot"])
+            await manager.async_delete_pin(lock_id, msg["slot"], msg.get("revision"))
             result = manager.public(lock)
         elif action == "history":
             # Use the same path as read_access_log to update HA's Last Access sensor.

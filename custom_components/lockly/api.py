@@ -1347,7 +1347,7 @@ def parse_log_ack(
             if width == LOG_RECORD_CHARS_WIDE:
                 slot = int(rec[14:16], 16) + int(rec[16:18], 16) * 256
                 record_id = int(rec[18:20], 16) + int(rec[20:22], 16) * 256
-                no_credential = slot == 0xFFFF
+                no_credential = slot == 0xFFFF or (caps.lock_type == 97 and slot == 0xFF)
             else:
                 slot = int(rec[14:16], 16)
                 record_id = int(rec[16:18], 16) + int(rec[18:20], 16) * 256
