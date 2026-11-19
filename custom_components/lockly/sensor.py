@@ -106,19 +106,14 @@ class LocklyBatterySensor(CoordinatorEntity, SensorEntity):
                 return s8_battery_percent(raw_v)
             return _voltage_to_pct(raw_v)
 
-        # Binary flag — from cloud cache (cachedstatus) or invalid voltage.
-        low = d.get("low_battery")
-        if low is None:
-            return None  # no data yet → unavailable
-        return None  # A binary warning is not a percentage.
+        # A binary warning cannot supply a percentage.
+        return None
 
     @property
     def extra_state_attributes(self) -> dict:
         d = self._lock_data
         attrs: dict = {}
-        # Which source produced the reading. 90 % from a sentinel and 90 %
-        # measured mean very different things to someone setting a low-battery
-        # alert, and nothing else on the entity distinguishes them.
+        # Distinguish a reported percentage from a voltage estimate.
         if d.get("battery_percent") is not None:
             attrs["source"] = "reported"
         elif d.get("wakeup_voltage") is not None and not d.get("battery_invalid"):

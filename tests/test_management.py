@@ -112,6 +112,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(s8_battery_percent(380), 0)
         self.assertEqual(s8_battery_percent(650), 100)
 
+    def test_battery_flag_is_not_a_percentage_and_reported_value_wins(self):
+        from custom_components.lockly.sensor import LocklyBatterySensor
+        sensor = LocklyBatterySensor.__new__(LocklyBatterySensor)
+        sensor._lock_id = UUID
+        values = {"ID": UUID, "wakeup_voltage": 510}
+        sensor.coordinator = SimpleNamespace(data={UUID: values}, _caps_for=lambda _: LockCapabilities(lock_type=97))
+        self.assertEqual(sensor.native_value, 50)
+        self.assertTrue(sensor.extra_state_attributes["estimated"])
+        values["battery_percent"] = 60
+        self.assertEqual(sensor.native_value, 60)
+        del values["battery_percent"]
+        del values["wakeup_voltage"]
+        for low in (False, True):
+            values["low_battery"] = low
+            self.assertIsNone(sensor.native_value)
+            self.assertEqual(sensor.extra_state_attributes["low_battery"], low)
+
     def test_history_uses_lock_timezone(self):
         from custom_components.lockly.api import parse_log_ack
         stamp = bytes([26, 11, 20, 9, 0, 0])
