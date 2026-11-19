@@ -351,6 +351,8 @@ class LockCapabilities:
         PGD628FN qualifies from lock firmware 4.03.10 up to (not including)
         8.00.00 — DeviceVersionManager's gate for this predicate.
         """
+        if self.lock_type == 97:  # PGD898S, BluetoothBeanManager + verified 0x78 reply
+            return True
         if self.lock_type != 21:  # PGD628FN
             return False
         return _version_between(self.firmware, "4.03.10", "8.00.00")

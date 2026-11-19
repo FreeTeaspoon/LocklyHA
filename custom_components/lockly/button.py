@@ -18,9 +18,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        LocklyRefreshButton(coordinator, lock) for lock in coordinator.locks if is_vision_lock(lock)
-    )
+    entities = [LocklyRefreshButton(coordinator, lock) for lock in coordinator.locks if is_vision_lock(lock)]
+    entities.extend(LocklyManagementRefreshButton(coordinator, lock) for lock in coordinator.locks
+                    if coordinator._caps_for(lock).lock_type == 97)
+    async_add_entities(entities)
 
 
 class LocklyRefreshButton(CoordinatorEntity, ButtonEntity):
@@ -43,3 +44,20 @@ class LocklyRefreshButton(CoordinatorEntity, ButtonEntity):
             raise HomeAssistantError("The Vision hub did not return a current lock status")
         self.coordinator._learn_from_status(self._lock, status)
         self.coordinator._publish_status(self._lock, status)
+
+
+class LocklyManagementRefreshButton(LocklyRefreshButton):
+    """Refresh settings without a background BLE polling loop."""
+
+    _attr_name = "Refresh settings and access"
+
+    def __init__(self, coordinator, lock):
+        super().__init__(coordinator, lock)
+        self._attr_unique_id = f"lockly_{lock['ID']}_refresh_management"
+
+    async def async_press(self) -> None:
+        from .vision_features import ManagementError
+        try:
+            await self.coordinator.management.async_refresh(self._lock["ID"])
+        except ManagementError as exc:
+            raise HomeAssistantError(str(exc)) from None

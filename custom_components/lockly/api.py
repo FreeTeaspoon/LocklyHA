@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import aiohttp
@@ -716,6 +717,13 @@ def outgoing_ble_command(frame_hex: str, master_code: str, uuid: str) -> int:
     return AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(frame[6:-2])[0]
 
 
+def outgoing_ble_subtype(frame_hex: str, master_code: str, uuid: str) -> int | None:
+    """Settings and named PIN replies echo a cleartext subcommand."""
+    frame = bytes.fromhex(frame_hex)
+    plain = AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(frame[6:-2])
+    return plain[1] if plain[0] in (0x01, 0x19) else None
+
+
 def parse_action_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
     """NewUnlockCmd replies contain result/status/event, not QueryLockStatus.
 
@@ -1270,7 +1278,7 @@ def build_query_log_cmd(
     return _aes_wrap(raw, derive_aes_key(master_code, uuid))
 
 
-def _decode_packed_datetime(hex12: str) -> int | None:
+def _decode_packed_datetime(hex12: str, timezone_name: str | None = None) -> int | None:
     """Decode a 6-byte packed yyMMddHHmmss timestamp to epoch milliseconds.
 
     Each byte holds one component as hex digits that read as decimal — 0x25 is
@@ -1289,7 +1297,8 @@ def _decode_packed_datetime(hex12: str) -> int | None:
     if not (1 <= month <= 12 and 1 <= day <= 31 and hour < 24 and minute < 60 and second < 60):
         return None
     try:
-        stamp = datetime(2000 + year, month, day, hour, minute, second)
+        stamp = datetime(2000 + year, month, day, hour, minute, second,
+                         tzinfo=ZoneInfo(timezone_name) if timezone_name else None)
     except ValueError:
         return None
     return int(stamp.timestamp() * 1000)
@@ -1300,6 +1309,7 @@ def parse_log_ack(
     master_code: str,
     uuid: str,
     caps: LockCapabilities | None = None,
+    timezone_name: str | None = None,
 ) -> list[dict] | None:
     """Parse a SyncUnlockRecord response into access-log records.
 
@@ -1329,7 +1339,7 @@ def parse_log_ack(
         records: list[dict] = []
         for start in range(0, usable, width):
             rec = body[start:start + width]
-            timestamp = _decode_packed_datetime(rec[0:12])
+            timestamp = _decode_packed_datetime(rec[0:12], timezone_name)
             if timestamp is None:
                 # Zero padding at the end of the block decodes as an impossible
                 # date; that marks the end of the real records.
@@ -1843,7 +1853,6 @@ async def api_list_guests(
             headers=_headers(jwt),
         ) as resp:
             body = await resp.json(content_type=None)
-            _LOGGER.debug("acu/crdntl/list raw response: %s", body)
             if str(body.get("cod")) != "200":
                 _LOGGER.error("acu/crdntl/list failed: cod=%s lock=%s", body.get("cod"), lock_id)
                 return None
@@ -1901,7 +1910,6 @@ async def api_add_guest(
             headers=_headers(jwt),
         ) as resp:
             body = await resp.json(content_type=None)
-            _LOGGER.debug("acu/save raw response: %s", body)
             if str(body.get("cod")) != "200":
                 _LOGGER.error("acu/save failed: cod=%s lock=%s", body.get("cod"), lock_id)
                 return None

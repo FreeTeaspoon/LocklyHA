@@ -45,6 +45,7 @@ from .api import (
     parse_ack,
     parse_action_ack,
     outgoing_ble_command,
+    outgoing_ble_subtype,
     parse_lock_settings_ack,
     parse_set_auto_lock_ack,
     parse_set_lock_settings_ack,
@@ -102,7 +103,7 @@ def _rate_rssi(rssi: int | None) -> str:
         return "fair"
     return "weak"
 
-PLATFORMS = ["binary_sensor", "button", "camera", "lock", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "camera", "lock", "sensor", "switch", "select"]
 
 # Per-lock fields set by something other than a status reading — the MQTT
 # battery push and the access-log poll — which a poll rebuilding a lock's data
@@ -131,6 +132,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator._mqtt_manager = LocklyMQTTManager(hass, coordinator)
         await coordinator._mqtt_manager.async_start()
     _register_services(hass, coordinator)
+    from .management import async_setup_management
+    await async_setup_management(hass)
     return True
 
 
@@ -173,6 +176,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._session: aiohttp.ClientSession | None = None
         self._vision_clients: dict[str, VisionClient] = {}
         self._vision_commands: dict[str, asyncio.Lock] = {}
+        from .vision_features import VisionManagement
+        self.management = VisionManagement(self)
         self._vision_reconnect_after: dict[str, float] = {}
         # True until we confirm cached-status is unsupported for this hub.
         self._cache_supported: bool = True
@@ -704,7 +709,9 @@ class LocklyCoordinator(DataUpdateCoordinator):
         try:
             client = self._vision_client(lock)
             expected = outgoing_ble_command(frame_hex, str(lock["mc"]), lock_id)
-            return (await client.async_exchange(bytes.fromhex(frame_hex), expected_command=expected)).hex().upper()
+            subtype = outgoing_ble_subtype(frame_hex, str(lock["mc"]), lock_id)
+            return (await client.async_exchange(bytes.fromhex(frame_hex), expected_command=expected,
+                                                expected_subtype=subtype)).hex().upper()
         except (VisionError, OSError) as exc:
             log = _LOGGER.debug if quiet else _LOGGER.warning
             log("Lockly Vision: %s", exc)
@@ -885,6 +892,13 @@ class LocklyCoordinator(DataUpdateCoordinator):
         lock = self._get_lock(lock_id)
         if lock is None:
             return False
+        if is_vision_lock(lock):
+            from .vision_features import ManagementError
+            try:
+                await self.management.async_setting(lock_id, "auto_lock_enabled", enabled)
+                return True
+            except ManagementError:
+                return False
         mc, uuid = str(lock["mc"]), lock["ID"]
         name = lock.get("na") or lock.get("blename") or uuid
 
@@ -1249,7 +1263,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._lock_log_read.add(lock_id)
         await self._poll_lock_log(lock)
 
-    async def _poll_lock_log(self, lock: dict) -> None:
+    async def _poll_lock_log(self, lock: dict, records_override: list[dict] | None = None) -> None:
         """Read the access log from the lock itself and surface recent records.
 
         Used where the cloud log is barren.  This wakes the lock, so it is only
@@ -1260,12 +1274,18 @@ class LocklyCoordinator(DataUpdateCoordinator):
         caps = self._caps_for(lock)
         cutoff = self._history_cutoff_ms()
 
-        if is_vision_lock(lock):
-            # This firmware rejects the paged BLE history query. Keep cloud
-            # history, and do not send this lock through the Secure LINK relay.
-            _LOGGER.debug("Lockly Vision: direct access-log query is not supported")
-            return
-        if lock_id in self._prefer_paged_log:
+        if records_override is not None:
+            records = records_override
+        elif is_vision_lock(lock):
+            if caps.lock_type != 97:
+                return
+            from .vision_features import ManagementError
+            try:
+                records = await self.management.async_history(lock_id)
+            except ManagementError as exc:
+                _LOGGER.warning("Lockly Vision history: %s", exc)
+                return
+        elif lock_id in self._prefer_paged_log:
             records = None
         else:
             records = await api_query_lock_log(
@@ -1273,7 +1293,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
                 nonce=nonce, caps=caps,
             )
 
-        if records is None:
+        if records is None and not is_vision_lock(lock):
             # The bulk read returns the whole log in one response, which some
             # locks' BLE links cannot carry — it comes back as a hub timeout or
             # a Bluetooth error.  The paged form asks for a bounded window
@@ -1505,6 +1525,10 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         if lock is None:
             _LOGGER.error("list_guests: lock_id %s not found", lock_id)
             return
+        if is_vision_lock(lock):
+            result = await coordinator.management.async_refresh(lock_id)
+            hass.bus.async_fire("lockly_guest_list", {"lock_id": lock_id, "guests": result["credentials"]})
+            return
         admin_acu_id = int(lock.get("adminAcuId") or 0)
         guests = await api_list_guests(
             coordinator._session, coordinator.jwt, coordinator.des3_key,
@@ -1512,7 +1536,8 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         )
         hass.bus.async_fire("lockly_guest_list", {
             "lock_id": lock_id,
-            "guests": guests or [],
+            "guests": [{k: g[k] for k in ("userAcuId", "name", "tp", "startTime", "endTime", "acuStatus", "guestType")
+                        if k in g} for g in (guests or [])],
         })
 
     async def handle_add_guest(call) -> None:
@@ -1521,6 +1546,9 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         if lock is None:
             _LOGGER.error("add_guest: lock_id %s not found", lock_id)
             return
+        if is_vision_lock(lock):
+            from homeassistant.exceptions import HomeAssistantError
+            raise HomeAssistantError("Use the Lockly access-management card for verified hardware PIN changes")
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         if "start_time" in call.data and "end_time" in call.data:
             start_ms = int(call.data["start_time"].timestamp() * 1000)
@@ -1546,6 +1574,9 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         if lock is None:
             _LOGGER.error("delete_guest: lock_id %s not found", lock_id)
             return
+        if is_vision_lock(lock):
+            from homeassistant.exceptions import HomeAssistantError
+            raise HomeAssistantError("Use the Lockly access-management card for verified hardware PIN changes")
         admin_acu_id = int(lock.get("adminAcuId") or 0)
         ok = await api_delete_guest(
             coordinator._session, coordinator.jwt, coordinator.des3_key,
@@ -1570,7 +1601,8 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
             return
         # Forget any cached answer so the service always re-reads the lock.
         coordinator._host_passwords.pop(lock_id, None)
-        nonce = await coordinator._refresh_nonce(lock)
+        nonce = (await coordinator._mqtt_nonce(lock) if is_vision_lock(lock)
+                 else await coordinator._refresh_nonce(lock))
         host_pwd = await coordinator._resolve_host_password(lock, nonce)
         hass.bus.async_fire("lockly_passwords_queried", {
             "lock_id": lock_id,

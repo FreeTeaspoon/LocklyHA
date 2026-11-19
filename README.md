@@ -545,3 +545,14 @@ MIT — see [LICENSE](LICENSE).
 ## Disclaimer
 
 This integration is not affiliated with, endorsed by, or supported by Lockly Security Inc. Use at your own risk. The integration was developed by reverse-engineering the Lockly Android app (version 3.2.9) for personal home-automation purposes.
+
+
+### Vision settings and access management
+
+PGD898S now has physical settings switches, Vision Connect doorbell volume,
+a battery-voltage sensor, and an admin-only card for named PINs with always,
+date-range and weekly schedules. Changes are verified against the physical
+lock. Read the [feature audit and card setup](docs/vision-parity.md) for supported
+features, battery corrections, and the app features that still need separate
+protocol work. Camera audio, fingerprint enrollment and vendor account sharing
+are not included in this release.

@@ -256,6 +256,21 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await request, action)
         self.assertEqual(self.frames, [status])
 
+    async def test_settings_groups_do_not_satisfy_each_others_queries(self):
+        self.client._connect = AsyncMock()
+        request = asyncio.create_task(self.client.async_exchange(
+            ble_frame(), expected_command=0x19, expected_subtype=2))
+        await asyncio.sleep(0)
+        def frame(group):
+            body = ble_frame()[:-1]
+            body = body[:6] + bytes([0x0A, 0x19, group]) + body[9:]
+            return body + bytes([crc8_lockly(body)])
+        old, wanted = frame(1), frame(2)
+        self.deliver(0, pack_control(33121, bypass(old)))
+        self.assertFalse(request.done())
+        self.deliver(1, pack_control(33121, bypass(wanted)))
+        self.assertEqual(await request, wanted)
+
     async def test_failed_command_has_no_fallback_or_replay(self):
         self.client._connect = AsyncMock()
         request = asyncio.create_task(self.client.async_exchange(ble_frame()))

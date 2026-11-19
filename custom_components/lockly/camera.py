@@ -43,7 +43,6 @@ class VisionCamera(Camera):
 
     _attr_has_entity_name = True
     _attr_name = "Camera"
-    _attr_is_streaming = False
     _attr_frame_interval = 0.5
 
     def __init__(self, lock: dict) -> None:
@@ -76,6 +75,8 @@ class VisionCamera(Camera):
         codec = None
         try:
             await self._client.async_start_video()
+            self._attr_is_streaming = True
+            self.async_write_ha_state()
             while time.monotonic() - self._requested_at < 10:
                 try:
                     frame, next_codec = await asyncio.wait_for(self._queue.get(), 2)
@@ -99,6 +100,8 @@ class VisionCamera(Camera):
             self._jpeg = None
             _LOGGER.warning("Lockly Vision camera: %s", exc)
         finally:
+            self._attr_is_streaming = False
+            self.async_write_ha_state()
             try:
                 await asyncio.wait_for(self._client.async_stop_video(), 2)
             except (VisionError, OSError, TimeoutError):

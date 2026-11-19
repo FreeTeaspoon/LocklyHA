@@ -19,14 +19,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import LocklyCoordinator
 from .api import describe_open_type
 from .const import BATTERY_MAX_V, BATTERY_MIN_V, DOMAIN
+from .vision_features import s8_battery_percent
 
 _LOGGER = logging.getLogger(__name__)
-
-# Sentinel percentages used when only the binary low/normal flag is available
-# (cloud cache endpoint, or live query with battery_invalid=True).
-_LOW_BAT_PCT = 10
-_OK_BAT_PCT = 90
-
 
 def _voltage_to_pct(raw: int) -> int:
     """Convert raw wakeup_voltage (10 mV units) to a clamped battery percentage.
@@ -49,6 +44,7 @@ async def async_setup_entry(
     for lock in coordinator.locks:
         entities.append(LocklyBatterySensor(coordinator, lock))
         entities.append(LocklyLastAccessSensor(coordinator, lock))
+        entities.append(LocklyVoltageSensor(coordinator, lock))
         entities.append(LocklySignalSensor(coordinator, lock, "ble_rssi", "Hub link signal"))
         entities.append(LocklySignalSensor(coordinator, lock, "hub_wifi_rssi", "Hub WiFi signal"))
     async_add_entities(entities)
@@ -61,11 +57,9 @@ def _lock_display_name(lock_data: dict, lock_id: str) -> str:
 class LocklyBatterySensor(CoordinatorEntity, SensorEntity):
     """Battery level for a Lockly lock.
 
-    Three sources, in descending order of how much they can be trusted: the
-    percentage the lock pushes on the MQTT channel, the wakeup_voltage from a
-    live BLE query run through our own curve, and the binary low/normal flag
-    from the cloud cache expressed as 10 % / 90 % sentinels. The `source`
-    attribute says which one produced the current reading.
+    Reported percentages take precedence. PGD898S voltage estimates use the
+    app's model-specific curve. Binary warnings remain attributes, never a
+    fabricated 10% or 90% reading.
     """
 
     _attr_has_entity_name = True
@@ -108,13 +102,15 @@ class LocklyBatterySensor(CoordinatorEntity, SensorEntity):
         # Real voltage — present after a live BLE query (startup or post-command).
         raw_v = d.get("wakeup_voltage")
         if raw_v is not None and not d.get("battery_invalid"):
+            if self.coordinator._caps_for(d).lock_type == 97:
+                return s8_battery_percent(raw_v)
             return _voltage_to_pct(raw_v)
 
         # Binary flag — from cloud cache (cachedstatus) or invalid voltage.
         low = d.get("low_battery")
         if low is None:
             return None  # no data yet → unavailable
-        return _LOW_BAT_PCT if low else _OK_BAT_PCT
+        return None  # A binary warning is not a percentage.
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -126,7 +122,9 @@ class LocklyBatterySensor(CoordinatorEntity, SensorEntity):
         if d.get("battery_percent") is not None:
             attrs["source"] = "reported"
         elif d.get("wakeup_voltage") is not None and not d.get("battery_invalid"):
-            attrs["source"] = "voltage"
+            attrs["source"] = ("Lockly Home S8 voltage thresholds"
+                               if self.coordinator._caps_for(d).lock_type == 97 else "voltage")
+            attrs["estimated"] = True
         elif d.get("low_battery") is not None:
             attrs["source"] = "low battery flag"
         raw_v = d.get("wakeup_voltage")
@@ -262,3 +260,26 @@ class LocklySignalSensor(CoordinatorEntity, SensorEntity):
             attrs["ssid"] = d.get("hub_wifi_ssid")
             attrs["hub_firmware"] = d.get("hub_firmware")
         return {k: v for k, v in attrs.items() if v is not None}
+
+
+class LocklyVoltageSensor(LocklyBatterySensor):
+    """Raw battery voltage, independent of percentage estimates."""
+
+    _attr_name = "Battery voltage"
+    _attr_device_class = SensorDeviceClass.VOLTAGE
+    _attr_native_unit_of_measurement = "V"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, lock):
+        super().__init__(coordinator, lock)
+        self._attr_unique_id = f"lockly_{lock['ID']}_battery_voltage"
+
+    @property
+    def native_value(self) -> float | None:
+        d = self._lock_data
+        raw = d.get("wakeup_voltage")
+        return round(raw * .01, 2) if raw is not None and not d.get("battery_invalid") else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {}

@@ -55,3 +55,8 @@ jobs:
         run: python tests/test_camera.py
         env:
           PYTHONPATH: .
+
+      - name: Access management, settings preservation and credential privacy
+        run: python tests/test_management.py
+        env:
+          PYTHONPATH: .

@@ -147,6 +147,7 @@ class VisionClient(asyncio.DatagramProtocol):
         self._reply: asyncio.Future | None = None
         self._expected: set[int] = set()
         self._expected_ble: int | None = None
+        self._expected_subtype: int | None = None
         self._maintenance: asyncio.Task | None = None
         self._pending: dict[int, tuple[bytes, float, int]] = {}
         self._sequence = 0
@@ -279,7 +280,9 @@ class VisionClient(asyncio.DatagramProtocol):
             if command in self._expected and self._reply is not None and not self._reply.done():
                 if self._expected_ble is not None:
                     frame = unpack_bypass(body)
-                    if frame[7] != self._expected_ble:
+                    if (frame[7] != self._expected_ble
+                            or (self._expected_subtype is not None and frame[6] == 0x0A
+                                and frame[8] != self._expected_subtype)):
                         if self._authenticated and self._on_frame:
                             self._on_frame(frame)
                         continue
@@ -413,11 +416,13 @@ class VisionClient(asyncio.DatagramProtocol):
 
     async def _request(
         self, command: int, payload: bytes, expected: set[int], expected_ble: int | None = None,
+        expected_subtype: int | None = None,
     ) -> bytes:
         loop = asyncio.get_running_loop()
         self._reply = loop.create_future()
         self._expected = expected
         self._expected_ble = expected_ble
+        self._expected_subtype = expected_subtype
         message = pack_control(command, payload)
         try:
             for offset in range(0, len(message), 1024):
@@ -436,16 +441,18 @@ class VisionClient(asyncio.DatagramProtocol):
         finally:
             self._expected = set()
             self._expected_ble = None
+            self._expected_subtype = None
             self._reply = None
 
-    async def async_exchange(self, frame: bytes, channel: int = 0, expected_command: int | None = None) -> bytes:
+    async def async_exchange(self, frame: bytes, channel: int = 0, expected_command: int | None = None,
+                             expected_subtype: int | None = None) -> bytes:
         """Send one BLE frame. Never automatically replay it after failure."""
         if not 1 <= len(frame) <= 100:
             raise VisionError("Vision short control frame exceeds 100 bytes")
         async with self._lock:
             await self._connect()
             payload = struct.pack("<4I", 2, channel, 0, len(frame)) + frame.ljust(100, b"\x00")
-            response = await self._request(33118, payload, {33117, 33119, 33121}, expected_command)
+            response = await self._request(33118, payload, {33117, 33119, 33121}, expected_command, expected_subtype)
             return unpack_bypass(response)
 
     async def async_connect(self) -> None:

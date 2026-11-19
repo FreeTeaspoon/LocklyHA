@@ -4,7 +4,7 @@ import io
 import unittest
 from fractions import Fraction
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import av
 
@@ -20,6 +20,7 @@ class CameraTests(unittest.IsolatedAsyncioTestCase):
             async_add_executor_job=executor,
             async_create_background_task=lambda coro, name: asyncio.create_task(coro, name=name),
         )
+        camera.async_write_ha_state = Mock()
         camera._client = SimpleNamespace(
             async_start_video=AsyncMock(), async_stop_video=AsyncMock(),
             _disconnect=AsyncMock(), async_close=AsyncMock(),
@@ -67,6 +68,7 @@ class CameraTests(unittest.IsolatedAsyncioTestCase):
         camera._client.async_start_video.assert_awaited_once()
         camera._client.async_stop_video.assert_awaited_once()
         camera._client._disconnect.assert_awaited_once()
+        self.assertFalse(camera.is_streaming)
 
     async def test_multiple_viewers_share_worker_and_unload_cleans_up(self):
         camera = self.camera()
@@ -81,10 +83,12 @@ class CameraTests(unittest.IsolatedAsyncioTestCase):
         camera._ready.set()
         self.assertEqual(await asyncio.gather(*images), [b"image", b"image"])
         camera._client.async_start_video.assert_awaited_once()
+        self.assertTrue(camera.is_streaming)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
         camera._client.async_stop_video.assert_awaited_once()
         camera._client._disconnect.assert_awaited_once()
+        self.assertFalse(camera.is_streaming)
 
 
 if __name__ == "__main__":
