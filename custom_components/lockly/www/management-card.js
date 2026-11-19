@@ -174,6 +174,8 @@ class LocklyManagementCard extends HTMLElement {
   closeEditor() { this.$("editor").reset(); this.$("editor").hidden = true; this.editingSlot = undefined; this.$("add").focus(); }
   disconnectedCallback() { if (this.$) this.$("pin").value = ""; }
 }
-customElements.define("lockly-management-card", LocklyManagementCard);
+if (!customElements.get("lockly-management-card")) customElements.define("lockly-management-card", LocklyManagementCard);
 window.customCards = window.customCards || [];
-window.customCards.push({type: "lockly-management-card", name: "Lockly access management", description: "PGD898S settings, PIN schedules and access history"});
+if (!window.customCards.some(card => card.type === "lockly-management-card")) {
+  window.customCards.push({type: "lockly-management-card", name: "Lockly access management", description: "PGD898S settings, PIN schedules and access history"});
+}
