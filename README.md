@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.8.0b5-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.8.0b5)
+[![Version](https://img.shields.io/badge/version-0.10.0b1-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.10.0b1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -21,13 +21,16 @@ PPCS protocol. It uses Python asyncio, with no phone bridge or vendor binary.
 |---|---|
 | Current lock state | Hardware reports locked |
 | Door circuit | Hardware reports closed, open-door transition pending |
-| Battery | Hardware voltage; HA percentage is an approximate AA voltage curve |
+| Battery | Hardware voltage and Lockly Home's S8 voltage thresholds |
 | Lock and unlock | Both commands require a fresh hardware status confirmation |
 | Refresh status button | Sends one live status query, which can beep |
 | External keypad/app updates | Receiver implemented; push delivery unverified |
 | Camera video | On-demand live JPEG/MJPEG, decoded locally from HEVC |
-| Camera audio / talk | Not implemented |
-| Guest PIN activation | Not verified on Vision |
+| Camera audio / talk | Live audio decoded; microphone transport accepts G.711 A-law. Turning the microphone off closes the session |
+| Guest and one-use PINs | Physical create/readback/delete verified; one-use consumption needs a keypad test |
+| Fingerprints | List, enroll, name and delete controls; enrollment start/stop verified |
+| Sharing | List, create, reveal and revoke local-door eKeys; account administrator invitations remain in Lockly Home |
+| Recordings | Storage/list, playback with audio, MP4 export; this hub reports no recording storage |
 
 Account login supplies the hub ID and password. Only `LOCKLYV-number-suffix`
 PPCS IDs are supported. Other Vision connection formats are not implemented.
@@ -551,8 +554,10 @@ This integration is not affiliated with, endorsed by, or supported by Lockly Sec
 
 PGD898S now has physical settings switches, Vision Connect doorbell volume,
 a battery-voltage sensor, and an admin-only card for named PINs with always,
-date-range and weekly schedules. Changes are verified against the physical
-lock. Read the [feature audit and card setup](docs/vision-parity.md) for supported
-features, battery corrections, and the app features that still need separate
-protocol work. Camera audio, fingerprint enrollment and vendor account sharing
-are not included in this release.
+date-range, weekly and one-use schedules. The card also manages fingerprints,
+local-door eKeys, live camera audio, microphone transmission and recordings.
+Read the [feature audit and card setup](docs/vision-parity.md) for the hardware
+checks and remaining limits. Fingerprint touch completion, one-use consumption,
+speaker audibility and playback from real storage still need physical tests.
+Turning the microphone off closes live view because this hub does not reliably
+acknowledge the separate stop-talk command.

@@ -5,7 +5,7 @@ firmware 2.01.96 / raw 00960102, T21 Vision Connect firmware 0228 and camera
 firmware 0098. This is a model-specific integration, not a claim of parity
 with every Lockly model or every Lockly Home feature.
 
-## Implemented and verified
+## Implemented features and verification
 
 | Feature | Home Assistant behavior | Evidence |
 | --- | --- | --- |
@@ -27,6 +27,12 @@ with every Lockly model or every Lockly Home feature.
 | Delete PIN | Deletes only the selected supported slot; protects owner/special slots | Test PIN deleted; original entries compared before/after |
 | Always / date range / weekly schedules | Encodes in the lock's configured time zone; rejects invalid ranges | App command references, protocol tests and live recurring-schedule test |
 | Access history | On-demand bulk `78` query, correct lock time zone, HA Last Access and events | 50 hardware records decoded |
+| One-use PINs | Explicit one-use option, separate slot 49, protected from ordinary schedule conversion | Temporary PIN created, read back and deleted; consumption at the keypad is untested |
+| Fingerprints | List, enroll with Finish/Stop and timeout, rename account names, delete hardware slots | Four original fingerprints listed; enrollment start/stop verified without adding a finger; naming/deletion and successful touch completion covered offline |
+| Shared eKeys | List, create for an ordinary always-access PIN, reveal for 30 seconds, revoke | Temporary unshared key created/read back/revoked; original key and hardware/account entries preserved |
+| Camera audio | Browser playback of locally decoded 8 kHz audio | Real camera codec 83 ADPCM decoded alongside live video |
+| Microphone | Browser microphone to G.711 A-law, explicit start; off closes the camera session | Hub accepted talk startup and silent audio frames; speaker audibility still needs a person at the door |
+| Recordings | Last seven days, storage capacity, playback with audio and MP4 export | Multipart protocol, frame ordering, audio codecs and video/audio MP4 timing checked offline. This hub reports zero storage and no clips, so actual recorded playback/export is untested |
 | Credential privacy | PIN inputs travel through an admin-only WebSocket, not HA service calls | Authorization, sanitization and transaction tests |
 
 Settings are read before every change. The write changes only the selected bit;
@@ -49,14 +55,13 @@ payload alignment, and reject incomplete or ambiguous credential lists.
 | --- | --- |
 | Auto-lock delay and alarm timing | App sends separate `12` / alarm commands and caches values locally. No verified hardware readback of the current timer was found. The enable switch preserves that timer; arbitrary delay editing is not exposed. |
 | Alarm configuration, safe/welcome/passage modes, slide/sensor controls | Commands and bitmap fields exist across Lockly models. Their semantics and applicability are not verified on this PGD898S; they are not presented as working controls. |
-| One-time and delegated/subadmin PINs | Special slots and separate app workflows exist. They are protected from the ordinary-PIN editor; one-time consumption and delegation are not implemented. |
-| Fingerprint listing, enrollment, rename and deletion | Separate sensor protocol, not the PIN list. Enrollment needs a person at the sensor and a complete progress/cancel workflow. Not implemented by this release. |
+| Delegated/subadmin PINs | Delegated entries remain protected. Account administrator invitations and permission changes are not implemented. |
 | Offline Access Codes (OAC) | Separate vendor key-generation/sharing workflow. Not implemented. |
-| eKeys, account invitations, sharing and access permissions | Vendor account workflows, distinct from writing a hardware PIN. Not implemented. |
+| Account invitations and remote/camera permissions | New eKeys grant local door access only. They never include the owner's camera/hub identity. Administrator invitations and permission management remain in Lockly Home. |
 | Cloud users and app synchronization | Hardware PIN names/schedules are read directly from the lock. HA does not create an account invitation or promise that the app's cached cloud directory immediately updates. |
 | Newer night-vision and radio-diagnostic settings | This hub did not answer `33294` or `33292`. Controls are not exposed for unsupported firmware. |
-| Camera audio / two-way talk | Requires additional audio streaming, codec and microphone transport. Current camera is video only. |
-| Camera recording controls, SD capacity, clip playback/export | Separate hub storage/playback protocol; not implemented. Existing recordings are untouched. |
+| Separate microphone-stop acknowledgement | T21/0228 did not reliably acknowledge command 7. Turning the microphone off closes the authenticated media session instead of leaving an uncertain talk session open. |
+| Recording deletion, formatting and automatic recording settings | Not exposed. Existing recordings are untouched. Playback needs functioning recording storage. |
 | PIR/automatic recording and camera power settings | Present in the camera SDK, not verified for this camera/firmware. Not exposed. |
 | Doorbell, motion and tamper push events | BLE/hub unsolicited-event coverage is incomplete. Do not rely on HA as a complete substitute for Lockly Home notifications. |
 | Wi-Fi setup, firmware updates, pairing and factory reset | Remain in Lockly Home / physical maintenance workflows. They are not added as ordinary dashboard actions. |
@@ -66,6 +71,35 @@ No cloud `acu/save` response is treated as proof that a PIN reached this lock.
 The older cloud-only add/delete services reject Vision operations and direct
 users to the verified hardware editor. Guest-list events are sanitized for all
 models; raw cloud credential responses are no longer debug-logged.
+
+## Access and media workflows
+
+Press **Refresh fingerprints**, enter a name, then **Start enrollment** while at
+the sensor. Follow the lock's prompts and press **Finish & check**. A newly
+occupied hardware slot confirms success. Sensor feedback is not shown as a made-up
+percentage. Enrollment stops after 60 seconds; stopping never deletes a finger
+that already enrolled. Other credential/settings reads are blocked while learning.
+
+Create an ordinary always-access guest PIN before creating its eKey. The eKey
+is revealed only on request and cleared after 30 seconds or when the card closes.
+No invitation is sent automatically. Creating a key preserves the selected cloud
+profile and rejects delegated permissions. Failed profile saves trigger revocation
+of only the newly generated key, followed by readback; uncertain writes are never
+replayed. Revoking an eKey leaves its keypad PIN in place. Delete that PIN separately
+to remove keypad access. Original family eKeys are never replaced automatically.
+
+**Open live view with audio** starts media only on click. Microphone access needs
+the browser's permission and an explicit button press. Turning it off closes live
+view. Card removal, hidden tabs, ten seconds without polling and the two-minute
+session limit stop media. Sessions belong to the requesting administrator and lock.
+Decoded media is held in memory and does not enter the HA event bus or logs.
+
+Refresh recordings before selecting playback or export. MP4 export includes video
+and audio, preserves playback timestamps and is capped at two minutes and 20 MB.
+Incomplete or overflowing exports are discarded. The live hub's storage response
+is `(free=0, total=0)`, so the card reports unavailable storage instead of claiming
+that a recorded clip was verified. No storage format or recording deletion command
+is sent.
 
 ## Battery findings
 
@@ -101,7 +135,7 @@ integration stops capture 10 seconds after its last frame request.
 
 ## Access card setup
 
-Add `/lockly/management-card.js?v=0.9.0b2` as a JavaScript module under dashboard
+Add `/lockly/management-card.js?v=0.10.0b1` as a JavaScript module under dashboard
 resources. Add a manual card:
 
 ```yaml

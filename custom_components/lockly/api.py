@@ -1831,6 +1831,29 @@ async def api_get_lock_history(
 
 # ── Guest / access user management ───────────────────────────────────────────
 
+class AccountManagementError(ValueError):
+    """Account operation failed with a safe, payload-free message."""
+
+
+async def api_management_request(session, jwt: str, des3_key: bytes, endpoint: str, request: dict) -> dict:
+    """Private management request. Never log credential bodies or replay writes."""
+    allowed = {"getFingerprintList", "fingerprint/save", "acu/list", "getEkeyList",
+               "admin/invite/list", "du/save", "gentptoken", "acu/admin/save", "admin/ekey/share", "rmtoken"}
+    if endpoint not in allowed:
+        raise ValueError("Unsupported management endpoint")
+    para = des3_encrypt(des3_key, json.dumps(request, separators=(",", ":")))
+    async with session.post(API_BASE + endpoint, json={**COMMON_BODY, "para": para},
+                            headers=_headers(jwt), timeout=aiohttp.ClientTimeout(total=20)) as response:
+        response.raise_for_status()
+        body = await response.json(content_type=None)
+    if not isinstance(body, dict) or str(body.get("cod")) != "200":
+        code = str(body.get("cod", "unknown")) if isinstance(body, dict) else "unknown"
+        if not code.isascii() or not code.isdigit() or len(code) > 6:
+            code = "unknown"
+        raise AccountManagementError(f"Lockly rejected the account operation, code {code}. Refresh before retrying")
+    return body
+
+
 async def api_list_guests(
     session: aiohttp.ClientSession,
     jwt: str,

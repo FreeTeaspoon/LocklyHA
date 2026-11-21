@@ -719,6 +719,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
 
     def _vision_status_received(self, lock: dict, frame: bytes) -> None:
         """Merge unsolicited lock status without waking the lock on each poll."""
+        self.management.access.receive(lock, frame)
         if frame[6:8] != b"\x0a\x1e":
             return
         status = parse_ack(frame.hex(), str(lock["mc"]), lock["ID"])
@@ -1479,6 +1480,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(updated)
 
     async def async_shutdown(self) -> None:
+        await self.management.access.close()
+        await self.management.media.close()
         for client in self._vision_clients.values():
             await client.async_close()
         self._vision_clients.clear()

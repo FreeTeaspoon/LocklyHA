@@ -15,6 +15,7 @@ from .api import _aes_wrap, crc8_lockly, derive_aes_key, encrypt_master_code
 # PwdIdUtil: host-managed ordinary slots, excluding the one-time slots 9/49.
 PIN_SLOTS = tuple(range(1, 9)) + tuple(range(10, 17)) + tuple(range(41, 49)) + tuple(range(50, 57))
 NEW_PIN_SLOTS = tuple(range(41, 49))
+ONE_TIME_SLOTS = (9, 49)
 SETTINGS = {
     "pin_genie": (1, 0x01),
     "keypad_sound": (1, 0x02),
@@ -84,8 +85,8 @@ class Credential:
 
     def public(self) -> dict:
         result = {"slot": self.slot, "name": self.name or ("Owner" if self.slot == 0 else f"PIN {self.slot}"),
-                  "kind": "owner" if self.slot == 0 else "pin",
-                  "editable": self.slot in PIN_SLOTS and self.user_type != 2}
+                  "kind": "owner" if self.slot == 0 else "one_time" if self.slot in ONE_TIME_SLOTS else "pin",
+                  "editable": self.slot in PIN_SLOTS + ONE_TIME_SLOTS and self.user_type != 2}
         if not self.schedule or self.schedule == b"\xff" * 10:
             result["schedule"] = {"type": "always"}
         elif self.schedule[0] == 0xFE:
@@ -172,9 +173,9 @@ def encode_schedule(options: dict, timezone: str) -> bytes:
     raise ManagementError("Unsupported schedule type")
 
 
-def build_set_pin(mc: str, uuid: str, nonce: str, entry: Credential) -> str:
+def build_set_pin(mc: str, uuid: str, nonce: str, entry: Credential, *, one_time: bool = False) -> str:
     validate_pin(entry.pin)
-    if entry.slot not in PIN_SLOTS or len(entry.schedule) != 10:
+    if entry.slot not in (ONE_TIME_SLOTS if one_time else PIN_SLOTS) or len(entry.schedule) != 10:
         raise ManagementError("This credential slot cannot be changed")
     name = encode_name(entry.name)
     tail = bytes(int(d) for d in entry.pin) + bytes([entry.slot]) + entry.schedule
@@ -189,8 +190,8 @@ def verify_set_reply(ack: str | None, mc: str, uuid: str, entry: Credential) -> 
         raise ManagementError("The lock did not confirm the credential change; refresh before retrying")
 
 
-def build_delete_pin(mc: str, uuid: str, nonce: str, entry: Credential) -> str:
-    if entry.slot not in PIN_SLOTS or entry.user_type == 2:
+def build_delete_pin(mc: str, uuid: str, nonce: str, entry: Credential, *, one_time: bool = False) -> str:
+    if entry.slot not in (ONE_TIME_SLOTS if one_time else PIN_SLOTS) or entry.user_type == 2:
         raise ManagementError("This credential slot cannot be deleted")
     return command(mc, uuid, 2, nonce, bytes(int(d) for d in entry.pin) + bytes([entry.slot]), subtype=3)
 
@@ -206,6 +207,10 @@ class VisionManagement:
         self.history: dict[str, list[dict]] = {}
         self.hub_volume: dict[str, int] = {}
         self.updated_at: dict[str, str] = {}
+        from .vision_access import VisionAccess
+        self.access = VisionAccess(self)
+        from .vision_media import VisionMedia
+        self.media = VisionMedia(self)
 
     def lock(self, lock_id: str) -> dict:
         lock = self.coordinator._get_lock(lock_id)
@@ -220,6 +225,8 @@ class VisionManagement:
         return self.coordinator._vision_commands.setdefault(lock["ID"], asyncio.Lock())
 
     async def nonce(self, lock: dict) -> str:
+        if self.access.enrollment.get(lock["ID"], {}).get("active"):
+            raise ManagementError("Finish or stop fingerprint enrollment before reading or changing the lock")
         status = await self.coordinator._query_live_status(lock)
         if not status or not status.get("ble_nonce"):
             raise ManagementError("Could not obtain a fresh lock status")
@@ -233,6 +240,9 @@ class VisionManagement:
 
     async def read_credentials(self, lock: dict, nonce: str) -> list[Credential]:
         ack = await self.exchange(lock, 0x2D, nonce)
+        if ack is None:
+            # One bounded recovery for an on-demand read. Never replay a write.
+            ack = await self.exchange(lock, 0x2D, await self.nonce(lock))
         entries = parse_credentials(ack, str(lock["mc"]), lock["ID"])
         self.credentials[lock["ID"]] = [{**e.public(), "revision": self.revision(e)} for e in entries]
         return entries
@@ -256,7 +266,12 @@ class VisionManagement:
         return {"lock_id": lock_id, "name": lock.get("na") or "Lockly", "timezone": lock.get("tzId") or "UTC",
                 "settings": {k: bool(settings[g] & mask) for k, (g, mask) in SETTINGS.items() if g in settings},
                 "credentials": self.credentials.get(lock_id, []), "history": self.history.get(lock_id, []),
-                "updated_at": self.updated_at.get(lock_id), "hub_volume": self.hub_volume.get(lock_id)}
+                "updated_at": self.updated_at.get(lock_id), "hub_volume": self.hub_volume.get(lock_id),
+                "fingerprints": self.access.fingerprints.get(lock_id, []),
+                "shares": self.access.shares.get(lock_id, []),
+                "recordings": self.media.recordings.get(lock_id),
+                "enrollment": {k: v for k, v in self.access.enrollment.get(lock_id, {}).items()
+                               if k in ("active", "responses", "message")}}
 
     async def async_refresh(self, lock_id: str) -> dict:
         lock = self.lock(lock_id)
@@ -300,17 +315,20 @@ class VisionManagement:
             raise ManagementError("This entry changed or the integration restarted. Refresh before changing it")
 
     async def async_save_pin(self, lock_id: str, name: str, pin: str, schedule: dict, slot: int | None = None,
-                             expected_revision: str | None = None) -> dict:
+                             expected_revision: str | None = None, *, one_time: bool = False) -> dict:
         lock = self.lock(lock_id)
         if pin or slot is None:
             validate_pin(pin)
         encode_name(name)
         timing = encode_schedule(schedule, lock.get("tzId") or "UTC")
+        if one_time and timing != b"\xff" * 10:
+            raise ManagementError("One-time PINs expire after one use and cannot have a weekly or date schedule")
         async with self.mutex(lock):
             nonce = await self.nonce(lock)
             before = await self.read_credentials(lock, nonce)
             if slot is None:
-                slot = next((s for s in NEW_PIN_SLOTS if all(e.slot != s for e in before)), None)
+                slot = next((s for s in ((49,) if one_time else NEW_PIN_SLOTS)
+                             if all(e.slot != s for e in before)), None)
                 if slot is None:
                     raise ManagementError("All supported guest slots are occupied")
             else:
@@ -318,12 +336,14 @@ class VisionManagement:
                 if old is None or not old.public()["editable"]:
                     raise ManagementError("Select an existing editable PIN")
                 self.verify_revision(old, expected_revision)
+                if (slot in ONE_TIME_SLOTS) != one_time:
+                    raise ManagementError("A PIN cannot change between ordinary and one-time access")
             if not pin:
                 pin = old.pin
             if any(e.slot != slot and hmac.compare_digest(e.pin, pin) for e in before):
                 raise ManagementError("Choose a PIN that is not already in use")
             desired = Credential(3, slot, pin, timing, name.strip())
-            frame = build_set_pin(str(lock["mc"]), lock_id, nonce, desired)
+            frame = build_set_pin(str(lock["mc"]), lock_id, nonce, desired, one_time=one_time)
             ack = await self.coordinator._vision_exchange_raw(lock, frame)
             # Never resend a write on a timeout: a read establishes what happened.
             after = await self.read_credentials(lock, await self.nonce(lock))
@@ -351,12 +371,13 @@ class VisionManagement:
             if old is None:
                 raise ManagementError("That credential no longer exists")
             self.verify_revision(old, expected_revision)
-            frame = build_delete_pin(str(lock["mc"]), lock_id, nonce, old)
+            frame = build_delete_pin(str(lock["mc"]), lock_id, nonce, old, one_time=slot in ONE_TIME_SLOTS)
             ack = await self.coordinator._vision_exchange_raw(lock, frame)
             after = await self.read_credentials(lock, await self.nonce(lock))
             self.publish(lock)
             self.verify_unchanged(before, after, slot)
-            if decrypt_reply(ack, str(lock["mc"]), lock_id, 2)[:2] != b"\x03\x00" or any(e.slot == slot for e in after):
+            if (ack and decrypt_reply(ack, str(lock["mc"]), lock_id, 2)[:2] != b"\x03\x00"
+                    or any(e.slot == slot for e in after)):
                 raise ManagementError("Deletion was not confirmed on the lock; refresh before retrying")
             return self.public(lock)
 

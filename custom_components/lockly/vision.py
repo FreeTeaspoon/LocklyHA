@@ -127,6 +127,8 @@ class VisionClient(asyncio.DatagramProtocol):
     def __init__(
         self, uid: str, password: str, on_frame: Callable[[bytes], None] | None = None,
         on_video: Callable[[bytes, int, bool], None] | None = None,
+        on_audio: Callable[[bytes, int], None] | None = None,
+        on_playback: Callable[[bytes, int, int, int], None] | None = None,
     ) -> None:
         self._uid = pack_uid(uid)
         self._password = password.encode()
@@ -134,6 +136,13 @@ class VisionClient(asyncio.DatagramProtocol):
             raise VisionError("Invalid Vision hub credential length")
         self._on_frame = on_frame
         self._on_video = on_video
+        self._on_audio = on_audio
+        self._on_playback = on_playback
+        self._playback_sequence = 0
+        self._playback_chunks: dict[int, bytes] = {}
+        self._playback_stream = bytearray()
+        self._audio_tx_sequence = 0
+        self._audio_pending: dict[int, tuple[bytes, float, int]] = {}
         self._video_sequence = 0
         self._video_chunks: dict[int, bytes] = {}
         self._video_stream = bytearray()
@@ -146,6 +155,7 @@ class VisionClient(asyncio.DatagramProtocol):
         self._ready: asyncio.Future | None = None
         self._reply: asyncio.Future | None = None
         self._expected: set[int] = set()
+        self._response_parts: list[bytes] | None = None
         self._expected_ble: int | None = None
         self._expected_subtype: int | None = None
         self._maintenance: asyncio.Task | None = None
@@ -192,6 +202,7 @@ class VisionClient(asyncio.DatagramProtocol):
             transport, self._transport = self._transport, None
             transport.close()
         self._pending.clear()
+        self._audio_pending.clear()
 
     def datagram_received(self, raw: bytes, address: tuple[str, int]) -> None:
         if len(raw) < 4 or len(raw) > 4096:
@@ -212,11 +223,12 @@ class VisionClient(asyncio.DatagramProtocol):
             elif kind == 0xF0:
                 self._fail("Vision hub closed the session")
             elif kind == 0xD1:
-                if len(payload) >= 4 and payload[:2] == b"\xd1\x00":
+                if len(payload) >= 4 and payload[0] == 0xD1 and payload[1] in (0, 1):
                     count = int.from_bytes(payload[2:4], "big")
                     if len(payload) == 4 + count * 2:
                         for offset in range(4, len(payload), 2):
-                            self._pending.pop(int.from_bytes(payload[offset:offset + 2], "big"), None)
+                            pending = self._audio_pending if payload[1] == 1 else self._pending
+                            pending.pop(int.from_bytes(payload[offset:offset + 2], "big"), None)
             elif kind == 0xD0:
                 self._receive_data(payload)
         except (VisionError, ValueError, struct.error) as exc:
@@ -253,12 +265,16 @@ class VisionClient(asyncio.DatagramProtocol):
         if len(payload) < 4 or payload[0] != 0xD1:
             return
         channel, sequence = payload[1], int.from_bytes(payload[2:4], "big")
-        if channel not in (0, 1):
+        if channel not in (0, 1, 3):
             return
         self._send(0xD1, payload[:2] + b"\x00\x01" + payload[2:4])
         if channel == 1:
-            if self._on_video:
+            if self._on_video or self._on_audio:
                 self._receive_video(sequence, payload[4:])
+            return
+        if channel == 3:
+            if self._on_playback:
+                self._receive_playback(sequence, payload[4:])
             return
         distance = (sequence - self._rx_sequence) & 0xFFFF
         if distance >= _WINDOW:
@@ -286,7 +302,18 @@ class VisionClient(asyncio.DatagramProtocol):
                         if self._authenticated and self._on_frame:
                             self._on_frame(frame)
                         continue
-                self._reply.set_result(body)
+                if self._response_parts is not None:
+                    if len(body) < 16 or body[13] not in (0, 1):
+                        raise VisionError("Invalid recording list part")
+                    if (len(self._response_parts) >= 256
+                            or sum(map(len, self._response_parts)) + len(body) > _MAX_MESSAGE):
+                        raise VisionError("Recording list exceeded its limit")
+                    self._response_parts.append(body)
+                    if not body[13]:
+                        continue
+                    self._reply.set_result(self._response_parts)
+                else:
+                    self._reply.set_result(body)
             elif command in (33117, 33119, 33121) and self._authenticated and self._on_frame:
                 self._on_frame(unpack_bypass(body))
 
@@ -311,12 +338,66 @@ class VisionClient(asyncio.DatagramProtocol):
             del self._video_stream[:32 + size]
             if flag in (428213528, 428216305) and self._on_video:
                 self._on_video(frame, codec, frame_type == 1)
+            elif flag == 428216306 and self._on_audio:
+                self._on_audio(frame, codec)
+
+    def _receive_playback(self, sequence: int, data: bytes) -> None:
+        if (sequence - self._playback_sequence) & 0xFFFF >= _WINDOW:
+            return
+        self._playback_chunks.setdefault(sequence, data)
+        while self._playback_sequence in self._playback_chunks:
+            self._playback_stream.extend(self._playback_chunks.pop(self._playback_sequence))
+            self._playback_sequence = (self._playback_sequence + 1) & 0xFFFF
+        if len(self._playback_stream) > 1048576 + 16:
+            raise VisionError("Vision playback buffer exceeded")
+        while len(self._playback_stream) >= 16:
+            flag, size, pts, kind = struct.unpack_from("<4I", self._playback_stream)
+            if flag not in (428213528, 428216305, 428216306, 553649432, 428213536) or size > 1048576:
+                raise VisionError("Invalid Vision playback frame")
+            if len(self._playback_stream) < 16 + size:
+                break
+            frame = bytes(self._playback_stream[16:16 + size])
+            del self._playback_stream[:16 + size]
+            self._on_playback(frame, flag, kind, pts)
+
+    async def async_audio(self, enabled: bool) -> None:
+        response = await self.async_hub_request(4 if enabled else 5, struct.pack("<I", 1),
+                                                {4, 20} if enabled else {5, 21})
+        if len(response) < 4 or struct.unpack_from("<i", response)[0] != 0:
+            raise VisionError("The camera refused audio")
+
+    async def async_talk(self, enabled: bool) -> None:
+        payload = struct.pack("<4I", 0, 1, 320, 0) if enabled else struct.pack("<I", 0)
+        response = await self.async_hub_request(6 if enabled else 7, payload, {6, 22} if enabled else {7, 23})
+        if len(response) < 4 or struct.unpack_from("<i", response)[0] != 0:
+            raise VisionError("The camera refused two-way talk")
+
+    def send_audio(self, alaw: bytes) -> None:
+        """One 40 ms G.711 A-law frame, matching the app's speaker transport."""
+        if not self.connected or len(alaw) != 320 or len(self._audio_pending) >= _WINDOW:
+            raise VisionError("Audio cannot be sent on this session")
+        frame = struct.pack("<4I", 428216306, len(alaw), 0, 0) + alaw
+        sequence = self._audio_tx_sequence
+        self._audio_tx_sequence = (sequence + 1) & 0xFFFF
+        data = b"\xd1\x01" + sequence.to_bytes(2, "big") + frame
+        self._audio_pending[sequence] = (data, time.monotonic(), 1)
+        self._send(0xD0, data)
 
     async def async_hub_request(self, command: int, payload: bytes, expected: set[int]) -> bytes:
         """Send one authenticated camera/hub request, without BLE passthrough."""
         async with self._lock:
             await self._connect()
             return await self._request(command, payload, expected)
+
+    async def async_recording_list(self, start: bytes, end: bytes) -> list[bytes]:
+        """Keep the control request open until the hub's final list part."""
+        async with self._lock:
+            await self._connect()
+            self._response_parts = []
+            try:
+                return await self._request(792, bytes(4) + start + end + bytes(4) + self._token, {793})
+            finally:
+                self._response_parts = None
 
     async def async_start_video(self) -> None:
         async with self._lock:
@@ -346,6 +427,13 @@ class VisionClient(asyncio.DatagramProtocol):
                 if now - last_alive > 5:
                     self._send(0xE0)
                     last_alive = now
+                for sequence, (data, sent, attempts) in list(self._audio_pending.items()):
+                    if now - sent >= 0.25:
+                        if attempts >= 4:
+                            self._fail("Vision microphone connection was interrupted")
+                            return
+                        self._send(0xD0, data)
+                        self._audio_pending[sequence] = (data, now, attempts + 1)
                 for sequence, (data, sent, attempts) in list(self._pending.items()):
                     if now - sent >= 0.75:
                         if attempts >= 5:
@@ -371,6 +459,10 @@ class VisionClient(asyncio.DatagramProtocol):
         self._video_sequence = 0
         self._video_chunks.clear()
         self._video_stream.clear()
+        self._playback_sequence = 0
+        self._playback_chunks.clear()
+        self._playback_stream.clear()
+        self._audio_tx_sequence = 0
         resolutions = await asyncio.gather(*(
             loop.getaddrinfo(host, 32100, family=socket.AF_INET, type=socket.SOCK_DGRAM)
             for host in _CLOUD_HOSTS
@@ -476,6 +568,7 @@ class VisionClient(asyncio.DatagramProtocol):
             await self._lost
         self._authenticated = False
         self._pending.clear()
+        self._audio_pending.clear()
 
     async def async_close(self) -> None:
         self._closed = True

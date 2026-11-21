@@ -1,0 +1,6 @@
+{
+  "name": "lockly-card-checks",
+  "private": true,
+  "type": "module",
+  "devDependencies": {"jsdom": "31.0.1"}
+}
