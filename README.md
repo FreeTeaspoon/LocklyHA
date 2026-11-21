@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/FreeTeaspoon/LocklyHA?include_prereleases)](https://github.com/FreeTeaspoon/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.10.0b1-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.10.0b1)
+[![Version](https://img.shields.io/badge/version-0.10.0b2-blue.svg)](https://github.com/FreeTeaspoon/LocklyHA/releases/tag/v0.10.0b2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.

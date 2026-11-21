@@ -235,6 +235,9 @@ class MediaSession:
                 response = await self.client.async_hub_request(794, payload, {795})
                 if len(response) < 8 or struct.unpack_from("<I", response)[0] != 16:
                     raise ManagementError("The hub did not start recording playback")
+            # Connection and camera wake-up can take longer than the idle
+            # timeout. Start the viewing clock when the session is usable.
+            self.last_poll = self.started = time.monotonic()
             self.worker = asyncio.create_task(self.run())
         except BaseException:
             await self.client.async_close()

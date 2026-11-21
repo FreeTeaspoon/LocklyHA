@@ -135,7 +135,7 @@ integration stops capture 10 seconds after its last frame request.
 
 ## Access card setup
 
-Add `/lockly/management-card.js?v=0.10.0b1` as a JavaScript module under dashboard
+Add `/lockly/management-card.js?v=0.10.0b2` as a JavaScript module under dashboard
 resources. Add a manual card:
 
 ```yaml

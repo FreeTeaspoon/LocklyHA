@@ -7,6 +7,7 @@ import io
 import json
 import struct
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -125,6 +126,18 @@ class ProtocolTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_camera_start_does_not_expire_before_first_poll(self):
+        session = MediaSession(LOCK, "admin")
+        session.last_poll = session.started = time.monotonic() - 15
+        session.client.async_start_video = AsyncMock()
+        session.client.async_audio = AsyncMock()
+        session.stop_transport = AsyncMock()
+        await session.start()
+        await asyncio.sleep(0)
+        self.assertFalse(session.poll()["ended"])
+        self.assertFalse(session.worker.done())
+        await session.close()
+
     async def test_recording_response_collects_every_part(self):
         client = VisionClient(LOCK["p2pdid"], "test")
         client._send = Mock()
